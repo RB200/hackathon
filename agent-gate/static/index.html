@@ -32,16 +32,35 @@
         <div class="mode-row"><label for="mode">Execution</label><select id="mode"><option value="replay">Offline replay</option><option value="live">Live OpenAI agent</option></select></div>
         <p id="mode-help" class="mode-help"></p>
         <div class="field-header"><label for="document">Untrusted document</label><label class="upload-button" for="file">Upload text ↗</label><input id="file" type="file" accept=".txt,.md,.csv,.json,.log,text/plain,text/markdown" hidden></div>
-        <textarea id="document" rows="9" maxlength="20000" spellcheck="false"></textarea><p class="help"><span id="document-count">0</span> / 20,000 characters · plain text only</p>
+        <textarea id="document" rows="9" maxlength="20000" spellcheck="false"></textarea><p class="help"><span id="document-count">0</span> / 20,000 characters · plain text only<br>Every run starts with a logged read_document call. Quarantined content is withheld.</p>
+        <label for="task-mode">Task permissions</label><select id="task-mode"><option value="summarize">Summarize · read only</option><option value="draft">Draft email · no sending</option><option value="send">Request send · requires approval</option></select><p id="task-mode-help" class="help"></p>
+        <label for="required-document">Required reference</label><select id="required-document"><option value="">None</option></select><p class="help">When selected, this document must be read and screened before any email action.</p>
         <label for="task">User task</label><textarea id="task" rows="3" maxlength="2000"></textarea>
         <fieldset><legend>Permissions for this run</legend><label class="checkbox"><input type="checkbox" id="allow-draft"><span>Allow email drafts</span></label><label class="checkbox"><input type="checkbox" id="allow-send"><span>Allow send requests <small>Always requires approval</small></span></label><p class="help">Allowed recipient: <span id="recipients"></span><br>Public documents only · 8 tool attempts per run</p></fieldset>
         <button id="run" class="primary" type="button">Run defense demo <span>→</span></button>
         <p class="footnote">Emails stay in a mock outbox. No real mail is sent.</p>
+        <button id="evaluate" class="secondary" type="button">Run regression report →</button><p class="help">Check all preset defenses and benign controls using scripted replay. No API calls.</p>
       </section>
       <div class="results-column">
         <section class="panel result-panel">
-          <div class="panel-heading"><h2>Defense result</h2><span id="run-status" class="badge neutral">READY</span></div>
-          <div class="metrics"><div><span>Document verdict</span><strong id="verdict">—</strong></div><div><span>Review findings</span><strong id="finding-count">0</strong></div><div><span>Quarantined</span><span class="metric-quarantine"><button id="quarantine-count" class="metric-value-help" type="button" aria-describedby="quarantine-tooltip" aria-label="Quarantined sources: 0">0</button><span id="quarantine-tooltip" class="metric-tooltip" role="tooltip">No source has been quarantined in this run.</span></span></div><div title="Includes unsafe tool actions identified during screening and tool calls rejected by the gate."><span>Tool actions stopped</span><strong id="blocked-count">0</strong></div><div><span>Mock sends</span><strong id="sent-count">0</strong></div></div>
+          <div class="result-tabs" role="tablist" aria-label="Firewall comparison">
+            <button id="protected-tab" type="button" role="tab" aria-selected="true" aria-controls="result-content">Protected</button>
+            <button id="unprotected-tab" type="button" role="tab" aria-selected="false" aria-controls="result-content" tabindex="-1" disabled>Firewall off</button>
+          </div>
+          <p id="comparison-notice" class="comparison-notice" hidden></p>
+          <p id="comparison-loading" class="comparison-loading" role="status" hidden>Running the firewall-off comparison…</p>
+          <div id="result-content" role="tabpanel" aria-labelledby="protected-tab">
+          <div class="panel-heading"><h2 id="result-heading">Defense result</h2><span id="run-status" class="badge neutral">READY</span></div>
+          <div class="metrics">
+            <div class="metric-verdict"><span>Input document verdict</span><strong id="verdict">—</strong></div>
+            <div class="metric-verdict"><span>User task verdict</span><strong id="task-verdict" aria-describedby="task-review-note">—</strong><p id="task-review-note" class="task-review-note">Checked against task permissions and sensitive-data rules.</p></div>
+            <div title="Related detector evidence is grouped into one finding."><span>Review findings</span><strong id="finding-count">0</strong></div>
+            <div><span>Quarantined sources</span><span class="metric-quarantine"><button id="quarantine-count" class="metric-value-help" type="button" aria-describedby="quarantine-tooltip" aria-label="Quarantined sources: 0">0</button><span id="quarantine-tooltip" class="metric-tooltip" role="tooltip">No source has been quarantined in this run.</span></span></div>
+            <div title="Distinct source/tool pairs inferred from suspicious evidence or tasks exceeding permissions. These are not actual calls."><span>Unsafe requests detected</span><strong id="request-count">0</strong></div>
+            <div title="Total tool call attempts / attempts blocked by the server gate. Includes calls waiting for approval; excludes inferred requests and approval rechecks."><span>Tool calls / blocked</span><strong id="blocked-count" aria-label="0 tool calls, 0 blocked">0 / 0</strong></div>
+            <div title="Tools that actually ran, including reads and mock drafts. Waiting for approval is not execution."><span>Actions executed</span><strong id="executed-count">0</strong></div>
+            <div><span>Mock sends</span><strong id="sent-count">0</strong></div>
+          </div>
           <div id="review-note" class="review-note">Choose a scenario to inspect what the agent can do and where the defense intervenes.</div>
           <div class="decision-log">
             <div class="panel-heading"><h2>Decision log</h2><div class="log-controls"><span id="event-count" class="tiny-label">0 EVENTS</span><button id="export" class="text-button" disabled>Export JSON ↗</button></div></div>
@@ -50,10 +69,13 @@
           </div>
           <div class="answer-heading"><h3>Agent answer</h3><span id="execution-label" class="tiny-label">NOT STARTED</span></div>
           <p id="summary" class="summary empty">The summary and tool outcomes will appear here.</p>
+          <div id="action-status" class="action-status" hidden><strong>Recorded action status</strong><p id="action-status-message"></p></div>
           <div id="run-error" class="error-box" role="alert" hidden></div>
+          </div>
         </section>
         <section id="approval-panel" class="panel approval-panel" hidden><div class="panel-heading"><h2>Review before sending</h2><span class="badge warning">HUMAN APPROVAL</span></div><p class="help">Approval applies to the exact payload below. It cannot override a policy block. Requests expire after five minutes.</p><div id="approvals"></div></section>
         <section id="artifacts-panel" class="panel" hidden><div class="panel-heading"><h2>Local artifacts</h2><span class="tiny-label">MOCK TOOLS</span></div><div id="artifacts"></div></section>
+        <section id="evaluation-panel" class="panel" hidden aria-live="polite"><div class="panel-heading"><h2>Regression report</h2><span id="evaluation-status" class="badge neutral">SCRIPTED REPLAY</span></div><p class="help">Offline policy and detector checks. Live model behavior and summary quality are not evaluated.</p><p id="evaluation-summary" class="review-note"></p><div class="report-scroll"><table class="report-table"><thead><tr><th>Scenario</th><th>Result</th><th>Blocked calls</th><th>Protection applied</th></tr></thead><tbody id="evaluation-cases"></tbody></table></div></section>
       </div>
     </div>
     <footer><span>AGENT GATE / HACKATHON DEMO</span><span id="model-info">Loading configuration…</span></footer>

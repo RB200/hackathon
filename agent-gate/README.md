@@ -38,6 +38,8 @@ ALLOWED_RECIPIENTS=team@example.com
 
 Start in offline replay for predictable policy outcomes; then switch to live mode to show real review and agent behavior.
 
+Every run begins with an actual gated `read_document({document_id: "supplied-document"})` call. The supplied text is stored only in that run and is not included directly in the agent's prompt. Live mode forces this function with the exact document ID; replay dispatches the same read before its scripted actions. Other actions are blocked until the read happens, and an agent that skips it cannot complete the run. A successful read counts in **Tool calls / blocked** and **Actions executed**, even when screening withholds the returned content. Quarantined supplied documents produce a withholding explanation instead of a fabricated summary. The initial review is reused for this read, so findings and quarantined-source counts are not duplicated.
+
 | Scenario | What happens in offline replay |
 | --- | --- |
 | Normal document | Public handbook read succeeds; launch facts are summarized. |
@@ -46,18 +48,41 @@ Start in offline replay for predictable policy outcomes; then switch to live mod
 | Tool misuse | A destructive request against a clean source is denied by the tool allowlist. |
 | Encoded secret | A compromised agent's scripted send to an allowed address contains a base64 fake key. DLP blocks it before approval. |
 | Human approval | Draft succeeds. Send pauses for exact-payload approval and then enters a **local mock outbox**, or is declined. |
+| Injection in retrieved document | Clean input; malicious release notes are withheld before model access. Quarantine blocks the next send. |
+| Benign security discussion | A quoted training example and tool documentation remain available for summarization. |
+| Do not delete | Negated requests do not create a deletion warning or quarantine. |
+| Paraphrased injection | Different wording still triggers screening; protected reads and sends are rejected. |
+| Draft without sending | Draft creation succeeds; a scripted send is blocked by task scope. |
 
-In live mode, none of the scripted proposals or forced verdicts apply. A real model may reject an attack before proposing a tool call. The gate still checks every proposed action. The destructive tool is deliberately absent from the model's tool definitions; the offline scenario tests what happens if a compromised caller requests it anyway.
+In live mode, none of the scripted attack proposals or forced reviewer verdicts apply. The supplied-document read is always forced; an optional required reference is read next. Subsequent model-selected actions may vary, and a real model may reject an attack before proposing an unsafe call. The gate still checks every proposed action. The destructive tool is deliberately absent from the model's tool definitions; the offline scenario tests what happens if a compromised caller requests it anyway.
 
 Try your own text by editing the document or uploading a plain-text file. Edits select **Custom document**. Custom offline mode performs heuristic screening, a public handbook read, and a labeled text preview; use live mode for an AI-generated summary and AI tool proposals. Document limit: 20,000 characters. Task limit: 2,000 characters.
 
-Decision log headings and finding categories use plain language. The decision log sits in the defense result where the finding cards were, with screening findings available by expanding the document review entry. Hover over or keyboard-focus the **Quarantined** count to see which source was quarantined and why. Click any decision log entry to inspect recorded findings, tool arguments, policy rules, and outcomes; entries open on demand and stay in chronological order. These are recorded checks and evidence, not hidden model reasoning. Review evidence shows likely requested tools inferred from each suspicious instruction; that does not mean a tool was invoked. **Tool actions stopped** counts rejected tool calls plus literal or inferred tool requests detected in a quarantined source before invocation; the note says how many calls reached the gate. In offline replay, scripted tool proposals demonstrate gate blocks. **Export JSON** downloads the redacted run snapshot, including screening evidence, policy, decisions, drafts, approvals and mock outbox.
+Select **Task permissions** before running: **Summarize** permits reads of the supplied document and public references only; **Draft email** permits drafting when granted; **Request send** permits email actions when granted and always requires human approval. The server enforces this selection independently of the model and of the checkboxes. Tools outside the selected scope are also omitted from the model's tool list. Old API clients that omit `task_mode` default to summarization. **Required reference** optionally selects a public document that must be read and screened after the supplied document and before any email action. While it is pending, the live model is required to call `read_document` with that exact ID; the server independently blocks email actions and rejects claimed completion if the read is skipped. Scenario 7 selects `release-notes` to demonstrate this boundary.
+
+The **User task verdict**, beside **Input document verdict**, separately checks the request against selected permissions and local sensitive-data rules. It shows **Outside permissions**, **Sensitive input**, or **No conflict detected**, with an explanation. This is a heuristic task check, not an LLM judgment that the user is malicious or a guarantee of safety. A clean document can accompany a forbidden deletion request. The check does not count inferred requests as blocked calls, and every actual tool call still requires the server gate.
+
+Decision log entries show source intake, grouped review findings, detected requests, actual permission checks, tool execution, retrieved-source reviews, and output scans in chronological order. Tool names appear directly in the row; expand it to inspect arguments, rules, evidence, and supporting detectors. These are recorded checks, not hidden model reasoning. The **Recorded action status** below the answer comes from server state: it identifies disabled actions, real pending approvals, and mock sends independently of promises in the model answer. Inferred tool requests are labeled as such and never counted as actual calls.
+
+The counters distinguish **Unsafe requests detected** (distinct source/tool pairs inferred from suspicious evidence or tasks outside permissions), **Tool calls / blocked** (total actual call attempts / attempts rejected by the gate), and **Actions executed** (reads, mock drafts, and approved mock sends). For example, `3 / 1` means three attempts with one blocked; pending approval may account for another attempt that has not executed. Approval requests do not count as execution; approval rechecks do not count as new agent calls. JSON metrics retain separate `tool_calls` and `blocked_tool_calls` values. **Quarantined sources** includes retrieved documents; hover or keyboard-focus the number to inspect source IDs and reasons. The input-document verdict can remain benign while a retrieved source quarantines the run. Related LLM and signature evidence is grouped by category and overlapping quote, with every supporting detector retained.
+
+Click **Run regression report** to check all 11 scenarios without API calls. It reports unauthorized executions, scripted task checks, benign controls incorrectly quarantined, rejected calls, and the protections applied. Expectations are defined independently of gate decisions. This report evaluates offline detector/policy behavior; it does not measure live model summary quality or attack success rates. Live models may refuse an attack before making any call, so live and replay counts can differ.
+
+**Export JSON** downloads the redacted run snapshot, including initial and retrieved source reviews, policy, decisions, drafts, approvals, and mock outbox.
+
+### Compare with the firewall off
+
+After a protected run finishes, select **Firewall off** at the top of its result panel. The server creates a separate comparison with the original task, document, reference and execution mode. Switching tabs preserves both results; opening the comparison again reuses it. A new defense run resets the comparison.
+
+The comparison disables source review, quarantine, tool permissions, recipient restrictions, outbound policy checks and human approval **inside an isolated mock tool environment**. It can read a synthetic `secrets.env`, send directly to its own mock outbox, delete copies of mock documents, or record simulated commands. It cannot access real files, execute a shell or deliver email. Transport redaction of configured credentials and audit redaction remain in place. Disabled detector counters show **Off**, rather than suggesting the input was safe.
+
+Offline mode uses a labeled vulnerable-agent script to illustrate possible consequences, including an extra synthetic secret read in the retrieved-injection scenario. It is not a prediction or evidence that an LLM was compromised. Live mode makes additional agent API calls with screening and application policy removed, and exposes the mock destructive tools; the model can still refuse. The two live runs can differ because the prompts, available tools and model choices differ. Compare recorded calls and mock effects, not just the wording of the answer.
 
 ## Defense layers
 
-1. **Trust boundaries:** user task and run permissions are separate from untrusted reference text. Document instructions never modify server policy. Tool results are labeled untrusted too.
-2. **Document screening:** a reviewer with no tools returns a strict risk/evidence JSON schema. Evidence must be exact document substrings. Heuristic matches cannot be overruled by a benign LLM verdict. A suspicious, malicious, refused, invalid or unavailable review quarantines the source. Quarantined runs can read public knowledge and summarize, but cannot draft or send.
-3. **Mandatory gate:** tool allowlist, strict runtime argument validation, exact public document IDs, exact recipient addresses, independent user-granted draft/send capabilities, and an eight-attempt budget. Blocked calls also count. The agent has no filesystem, shell, arbitrary network, or deletion tool.
+1. **Trust boundaries:** user task and run permissions are separate from untrusted reference text. Document instructions never modify server policy. Tool results are labeled untrusted and screened before model access.
+2. **Document screening:** a reviewer with no tools returns a strict risk/evidence JSON schema. Evidence must be exact document substrings. Heuristic matches cannot be overruled by a benign LLM verdict. A suspicious, malicious, refused, invalid or unavailable review quarantines the source. Every retrieved read/search document is screened too. Suspicious retrieved text is withheld, quarantine disables email actions for the whole run, and pending approvals are canceled. Repeated sources reuse review only when both their ID and content digest match. Quarantine cannot be cleared by a later benign source. Heuristics skip locally negated patterns and quoted educational examples; those filters remain fallible, and live LLM review still runs independently.
+3. **Mandatory gate:** tool allowlist, strict runtime argument validation, run-local supplied-document access plus exact public reference IDs, required supplied-document read, exact recipient addresses, selected task mode plus independent user-granted draft/send capabilities, and an eight-attempt budget. The mandatory read and blocked calls also count. The agent has no filesystem, shell, arbitrary network, or deletion tool.
 4. **Data checks:** redact recognized sensitive input before any model request; block sensitive tool arguments/results and final answers. Recognizes the synthetic protected key, configured API key, their exact base64/URL-safe base64/hex/percent-encoded forms, whitespace/zero-width splits, and selected API/AWS/private-key patterns. Audit and API snapshots redact sensitive strings too.
 5. **Human approval:** allowed sends generate a server-held copy of the exact recipient, subject and body. A random action ID is scoped to its run, expires in five minutes and is single use. The approval endpoint accepts only that ID and a boolean decision. All policy rules are rechecked before execution. Approval cannot authorize a denied action.
 6. **Audit:** record source trust, screening findings, proposed action, decision, rule and outcome. Final answers are checked separately. No raw prompts or provider error bodies are printed.
@@ -75,7 +100,7 @@ Browser → Local server → Input redaction → Isolated reviewer
                       ↓              ↓
                  Public reads    Draft / approval → Mock outbox
                       ↓
-                 Tool-result check → Agent → Final-answer check
+                 Tool-result screening → Agent → Final-answer check
 
 Every decision → redacted in-memory event log → Browser / JSON export
 ```
@@ -86,15 +111,20 @@ Every decision → redacted in-memory event log → Browser / JSON export
 | `defense/provider.py` | OpenAI Responses API adapter, request redaction, timeouts and sanitized errors. |
 | `defense/engine.py` | Isolated review, evidence validation, quarantine, live tool loop and labeled offline replay. |
 | `defense/security.py` | Deterministic tool gate, permission rules, approvals, secret recognition and redaction. |
-| `defense/fixtures.py` | Synthetic public knowledge, fake protected key and demo scenarios. |
+| `defense/fixtures.py` | Synthetic public knowledge, fake protected key and 11 demo scenarios. |
+| `defense/evidence.py` | Context-aware heuristic helpers, inferred tool intent, and grouping of supporting evidence. |
+| `defense/evaluation.py` | Offline regression report with independent per-scenario expectations. |
+| `defense/comparison.py` | Separate firewall-off live/replay execution with synthetic secrets and isolated mock effects. |
 | `static/` | Browser UI; untrusted values are rendered with `textContent`, never HTML. |
 | `tests/test_defenses.py` | Boundary regression tests, stubbed model loops and local HTTP integration tests. |
 
 ## HTTP API
 
 - `GET /api/config` — model configuration, live availability, scenarios and local CSRF token; never the API key.
-- `POST /api/runs` — `{mode, task, document, allow_draft, allow_send, scenario_id}`. Returns a snapshot and starts a background run.
+- `POST /api/runs` — `{mode, task_mode, required_document, task, document, allow_draft, allow_send, scenario_id}`. Returns a snapshot and starts a background run.
+- `POST /api/evaluations` — `{}`; checks all preset scenarios in offline replay and returns the regression report.
 - `GET /api/runs/{id}` — polling snapshot; also expires stale approvals.
+- `POST /api/runs/{id}/comparison` — `{}`; starts or returns the cached isolated firewall-off comparison for a finished protected run. Input overrides are not accepted. Snapshots identify `firewall_enabled`, `comparison_of`, and synthetic `comparison_effects`.
 - `POST /api/runs/{id}/approval` — `{action_id, approve}`; returns updated snapshot.
 
 POST requests require `Content-Type: application/json` and `X-CSRF-Token` from `/api/config`. The server binds to `127.0.0.1`, verifies Host and supplied Origin, serves only three fixed static paths, and applies a Content Security Policy. Up to two runs execute concurrently. At most 50 runs are retained; completed runs are evicted first. Pending runs remain until approved, declined, expired on polling, or server restart. All state is in memory.
@@ -106,7 +136,7 @@ python3 -B -m unittest discover -s tests -v
 node --check static/app.js
 ```
 
-Tests cover detector misses, unavailable/invalid reviews, quarantine, unknown tools, malformed arguments, path tricks, recipient tricks, encoded secrets, final-answer leaks, API-request redaction, budget exhaustion, immutable/single-use/expired approvals, policy rechecks, forged approval payloads, CSRF/origin checks and hidden-file access. OpenAI calls are stubbed in tests, so they need no API key and incur no inference cost.
+The 65 tests cover selected-task enforcement, forged out-of-scope calls, required-reference ordering and completion checks, retrieved and search-result injection, review failure during retrieval, pending approval cancellation, grouped evidence, benign educational/negated controls, regression reporting, detector misses, unavailable/invalid reviews, quarantine, unknown tools, malformed arguments, path tricks, recipient tricks, encoded secrets, final-answer leaks, API-request redaction, budget exhaustion, immutable/single-use/expired approvals, policy rechecks, forged approval payloads, CSRF/origin checks and hidden-file access. OpenAI calls are stubbed in tests, so they need no API key and incur no inference cost.
 
 Use `-B` for Python commands to avoid bytecode artifacts. `server.py` also disables bytecode before importing project modules.
 
@@ -116,6 +146,6 @@ This is an eight-hour demo with fixed public knowledge and mock email tools. The
 
 The reviewer and heuristics can miss attacks or flag legitimate security discussion. DLP uses a bounded set of known values/encodings and credential patterns; it does not comprehensively detect arbitrary encodings, transformed secrets, personal data, or fragments distributed across messages. Exact matching and enforced data-access scope are independent of detector limitations.
 
-The app is a local single-user demo without login, durable audit storage, or production isolation. Future retrieval sources need review/taint handling before their content enters a run. Real tool adapters need least-privilege credentials, authentication, durable approval storage and execution-side validation.
+The app is a local single-user demo without login, durable audit storage, or production isolation. New retrieval adapters must route every returned source through the existing screening flow before its content enters a run. The added reviews introduce model calls and latency for each new source in live mode. Real tool adapters need least-privilege credentials, authentication, durable approval storage and execution-side validation.
 
 The integration follows the official OpenAI documentation for [GPT-4.1 mini](https://developers.openai.com/api/docs/models/gpt-4.1-mini), [function calling](https://developers.openai.com/api/docs/guides/function-calling), and [structured outputs](https://developers.openai.com/api/docs/guides/structured-outputs).

@@ -2,6 +2,8 @@
 
 const $ = (id) => document.getElementById(id);
 let config, currentRun = null, timer = null, renderSignature = "", running = false;
+let protectedRun = null, comparisonRun = null, resultView = "protected", comparisonTimer = null, comparisonStarting = false, resultEpoch = 0;
+const terminalStatuses = ["completed", "failed", "awaiting_approval"];
 
 const FINDING_GUIDANCE = {
   role_override: {label: "Tries to change the AI’s instructions", explanation: "This document asks the AI to ignore its assigned rules or take on a different role."},
@@ -19,6 +21,10 @@ const STAGE_LABELS = {
   egress: "Output data check",
   approval: "Human approval",
   completion: "Run status",
+  request: "Request detected",
+  retrieval: "Retrieved document review",
+  execution: "Tool execution",
+  simulation: "Comparison sandbox",
 };
 
 const DETAIL_LABELS = {
@@ -30,16 +36,28 @@ const DETAIL_LABELS = {
   findings: "Review evidence",
   model: "Model",
   step: "Agent step",
+  tool_choice: "Tool selection for this step",
+  required_document: "Required read",
   tool: "Requested tool",
+  origin: "Request source",
+  attempted: "Call reached the gate",
   arguments: "Submitted arguments",
   rule: "Rule applied",
   attempt: "Tool attempt",
   action_id: "Approval action",
+  source_id: "Source document",
+  document_id: "Document read",
+  task_mode: "Selected task",
+  outcome: "Execution outcome",
+  cached: "Previously reviewed",
+  side_effect: "Created or sent a mock artifact",
+  deleted_documents: "Mock documents deleted",
 };
 
 const RULE_LABELS = {
   provider_input_dlp: "Sensitive input removed before model access",
-  document_scope: "Only public documents may be read",
+  document_scope: "Only the supplied document and listed public documents may be read",
+  document_pending: "Supplied document must be read before continuing",
   document_quarantine: "Quarantine disables drafting and sending",
   tool_allowlist: "Tool is not on the server allowlist",
   argument_schema: "Tool arguments did not match the required schema",
@@ -48,11 +66,15 @@ const RULE_LABELS = {
   send_capability: "Sending permission was not granted",
   recipient_allowlist: "Recipient is not on the exact allowlist",
   human_approval: "Human approval required before sending",
+  task_scope: "Selected task mode prohibits this action",
+  reference_pending: "Required reference must be read and screened first",
+  tool_result_dlp: "Sensitive content withheld from a tool result",
   tool_budget: "Tool attempt limit reached",
   policy_pass: "Tool, scope, permissions, and data checks passed",
   final_output_dlp: "Final response checked for sensitive data",
   provider_failure: "Model provider failed; pending actions canceled",
   internal_failure: "Run failed closed; pending actions canceled",
+  firewall_off: "Application firewall disabled in the isolated mock comparison",
 };
 
 function element(tag, className, text) {
@@ -63,7 +85,7 @@ function element(tag, className, text) {
 }
 
 function badgeClass(decision) {
-  return {allowed: "success", completed: "success", blocked: "danger", failed: "danger", quarantined: "warning", approval_required: "warning", awaiting_approval: "warning"}[decision] || "neutral";
+  return {allowed: "success", completed: "success", executed: "success", unchecked: "warning", detected: "warning", blocked: "danger", failed: "danger", quarantined: "warning", approval_required: "warning", awaiting_approval: "warning"}[decision] || "neutral";
 }
 
 function setBadge(node, label, decision) {
@@ -78,6 +100,10 @@ function appendEventDetail(container, key, value) {
   if (key === "rule" && typeof value === "string") {
     content.append(element("span", "", RULE_LABELS[value] || value.replaceAll("_", " ")));
     if (RULE_LABELS[value]) content.append(element("code", "event-code", value));
+  } else if (key === "attempted" && typeof value === "boolean") {
+    content.append(element("span", "", value ? "Yes — an actual tool call was submitted." : "No — this entry does not represent an agent tool call."));
+  } else if (key === "origin") {
+    content.append(element("span", "", {agent_call: "Live model proposal", scripted_replay: "Scripted replay proposal", comparison: "Isolated firewall-off comparison", user_task: "Inferred from the user task", approval_recheck: "Stored payload checked again after approval", approval: "Approved stored payload"}[value] || value));
   } else if (key === "findings" && Array.isArray(value)) {
     const list = element("div", "event-findings");
     for (const finding of value) {
@@ -89,6 +115,13 @@ function appendEventDetail(container, key, value) {
         item.append(element("p", "event-requested-tools", `Likely requested tool${finding.requested_tools.length === 1 ? "" : "s"}: ${finding.requested_tools.join(", ")}`));
       }
       if (finding.reason) item.append(element("p", "", finding.reason));
+      if (finding.signals?.length) {
+        const signals = element("details", "finding-signals");
+        const sources = [...new Set(finding.signals.map((signal) => signal.source))];
+        signals.append(element("summary", "", `Supporting checks: ${sources.join(", ")} (${finding.signals.length})`));
+        for (const signal of finding.signals) signals.append(element("p", "", `${signal.source}: ${signal.reason}`), element("code", "", signal.quote));
+        item.append(signals);
+      }
       list.append(item);
     }
     content.append(list);
@@ -103,41 +136,43 @@ function appendEventDetail(container, key, value) {
 
 function metricsFor(run) {
   const events = Array.isArray(run.events) ? run.events : [];
-  const review = run.review || {};
-  const outbox = Array.isArray(run.outbox) ? run.outbox : [];
-  const blockedEvents = events.filter((item) => item.stage === "tool" && item.decision === "blocked");
-  const blockedToolNames = new Set(blockedEvents.map((item) => item.details?.tool).filter(Boolean));
-  const detectedToolNames = new Set();
-  if (review.quarantine) {
-    for (const finding of review.findings || []) {
-      if (Array.isArray(finding.requested_tools)) {
-        finding.requested_tools.forEach((name) => detectedToolNames.add(name));
-      } else if (finding.category === "tool_instruction") {
-        for (const match of finding.quote.matchAll(/\b(?:read_document|search_knowledge|draft_email|send_email|delete_document|execute_shell)\b/g)) detectedToolNames.add(match[0]);
-      }
-    }
-  }
-  const measured = {
-    review_findings: Array.isArray(review.findings) ? review.findings.length : 0,
-    source_quarantined: Boolean(review.quarantine || ["suspicious", "malicious", "unknown"].includes(review.risk)),
-    blocked_tool_calls: blockedEvents.length,
-    tool_actions_stopped: blockedEvents.length + [...detectedToolNames].filter((name) => !blockedToolNames.has(name)).length,
-    mock_sends: outbox.length,
+  const sources = run.sources || (run.review ? [{source_id: "supplied-document", ...run.review}] : []);
+  const requests = new Set();
+  sources.forEach((source) => (source.findings || []).forEach((finding) =>
+    (finding.requested_tools || []).forEach((name) => requests.add(`${source.source_id}:${name}`))));
+  events.filter((event) => event.stage === "request").forEach((event) => requests.add(`user_task:${event.details?.tool}`));
+  return {
+    review_findings: sources.reduce((count, source) => count + (source.findings?.length || 0), 0),
+    quarantined_sources: sources.filter((source) => source.quarantine).length,
+    unsafe_requests_detected: requests.size,
+    tool_calls: events.filter((event) => event.stage === "tool" && event.details?.attempted === true).length,
+    blocked_tool_calls: events.filter((event) => event.stage === "tool" && event.decision === "blocked" && event.details?.attempted === true).length,
+    actions_executed: events.filter((event) => event.stage === "execution").length,
+    mock_sends: run.outbox?.length || 0,
+    ...run.metrics,
   };
-  // Fall back for snapshots from a server started before these metrics existed.
-  return {...measured, ...run.metrics, tool_actions_stopped: run.metrics?.tool_actions_stopped ?? measured.tool_actions_stopped};
 }
 
 function quarantineDescription(run) {
-  const review = run.review || {};
-  if (!review.quarantine) return "No source document was quarantined in this run.";
-  const scenario = config?.scenarios?.find((item) => item.id === run.scenario_id);
-  const source = scenario?.name.replace(/^\d+\s*\/\s*/, "") || "the supplied document";
-  const labels = [...new Set((review.findings || []).map((finding) => FINDING_GUIDANCE[finding.category]?.label || FINDING_GUIDANCE.other.label))];
-  const reason = labels.length
-    ? `Detected: ${labels.slice(0, 3).join(", ")}${labels.length > 3 ? ", and other findings" : ""}.`
-    : (review.risk === "unknown" ? "The review was unavailable or could not be validated." : "The review marked the document suspicious.");
-  return `Quarantined source: ${source}. ${reason} Drafting and sending were disabled for this run.`;
+  const sources = (run.sources || []).filter((source) => source.quarantine);
+  if (!sources.length) return "No source document was quarantined in this run.";
+  return sources.map((source) => {
+    const labels = [...new Set((source.findings || []).map((finding) => FINDING_GUIDANCE[finding.category]?.label || "Suspicious instruction"))];
+    return `${source.source_id}: ${labels.join(", ") || "Review unavailable or invalid"}.`;
+  }).join(" ") + " Drafting and sending are disabled for the run.";
+}
+
+function taskModeHelp() {
+  const mode = $("task-mode").value;
+  $("allow-draft").disabled = mode === "summarize";
+  $("allow-send").disabled = mode !== "send";
+  if (mode === "summarize") $("allow-draft").checked = false;
+  if (mode !== "send") $("allow-send").checked = false;
+  $("task-mode-help").textContent = {
+    summarize: "The supplied document must be read through a tool. Only document reads and summaries are permitted.",
+    draft: "Drafts require the permission below. Sending is prohibited for this task.",
+    send: "Email actions require the permissions below. Every send still needs approval of the exact payload.",
+  }[mode];
 }
 
 function error(message) {
@@ -155,8 +190,8 @@ async function request(path, body) {
 
 function modeHelp() {
   $("mode-help").textContent = $("mode").value === "replay"
-    ? "Offline replay: scripted tool proposals + heuristic screening. This demonstrates policy enforcement; no LLM is called."
-    : `Live mode: ${config.agent_model} proposes tools; ${config.reviewer_model} reviews the document. Model behavior may vary.`;
+    ? "Offline replay: required document read, scripted tool proposals and heuristic screening. No LLM is called."
+    : `Live mode: ${config.agent_model} must call read_document before answering; ${config.reviewer_model} reviews the document. Additional tool choices may vary.`;
 }
 
 function selectScenario() {
@@ -166,6 +201,9 @@ function selectScenario() {
   $("task").value = scenario.task;
   $("allow-draft").checked = scenario.allow_draft;
   $("allow-send").checked = scenario.allow_send;
+  $("task-mode").value = scenario.task_mode || "summarize";
+  $("required-document").value = scenario.required_document || "";
+  taskModeHelp();
   $("scenario-description").textContent = scenario.description;
   updateCount();
 }
@@ -181,11 +219,26 @@ function markCustom() {
 }
 
 function resetResults() {
+  resultEpoch += 1;
+  clearTimeout(comparisonTimer);
+  protectedRun = comparisonRun = null;
+  comparisonStarting = false;
+  resultView = "protected";
+  updateTabs();
+  $("result-content").hidden = false;
+  $("comparison-loading").hidden = true;
+  $("result-heading").textContent = "Defense result";
   currentRun = null;
   renderSignature = "";
   $("verdict").textContent = "—";
   $("verdict").className = "";
-  $("blocked-count").textContent = "0";
+  $("task-verdict").textContent = "—";
+  $("task-verdict").className = "";
+  $("task-review-note").textContent = "Checking the user task against the selected permissions…";
+  $("blocked-count").textContent = "0 / 0";
+  $("blocked-count").setAttribute("aria-label", "0 tool calls, 0 blocked");
+  $("request-count").textContent = "0";
+  $("executed-count").textContent = "0";
   $("finding-count").textContent = "0";
   $("quarantine-count").textContent = "0";
   $("quarantine-count").setAttribute("aria-label", "Quarantined sources: 0");
@@ -194,6 +247,7 @@ function resetResults() {
   $("review-note").textContent = "Reviewing untrusted content…";
   $("summary").textContent = "Waiting for agent response…";
   $("summary").className = "summary empty";
+  $("action-status").hidden = true;
   $("events").replaceChildren();
   $("event-count").textContent = "0 EVENTS";
   $("approval-panel").hidden = true;
@@ -204,41 +258,139 @@ function resetResults() {
   setBadge($("run-status"), "starting", "starting");
 }
 
+function updateTabs() {
+  for (const [view, id] of [["protected", "protected-tab"], ["off", "unprotected-tab"]]) {
+    const selected = resultView === view;
+    $(id).setAttribute("aria-selected", String(selected));
+    $(id).tabIndex = selected ? 0 : -1;
+  }
+  $("unprotected-tab").disabled = !protectedRun || !terminalStatuses.includes(protectedRun.status);
+  $("result-content").setAttribute("aria-labelledby", resultView === "off" ? "unprotected-tab" : "protected-tab");
+  $("comparison-notice").hidden = resultView !== "off";
+  $("comparison-notice").textContent = protectedRun?.mode === "live"
+    ? "Firewall off · Separate live run of the same model and inputs. Screening, tool permissions, outbound policy and send approval are disabled. The model may still refuse. Extra API calls apply. All secrets, sends, deletions and commands are synthetic mock effects."
+    : "Firewall off · Scripted vulnerable-agent replay using the same inputs, with screening, tool permissions, outbound policy and send approval disabled. This illustrates possible consequences; it does not predict what an LLM would do. All secrets, sends, deletions and commands are synthetic mock effects.";
+}
+
+function showSelectedResult() {
+  updateTabs();
+  const selected = resultView === "off" ? comparisonRun : protectedRun;
+  $("result-content").hidden = !selected;
+  $("comparison-loading").hidden = resultView !== "off" || !!selected;
+  if (selected) render(selected);
+  else {
+    currentRun = null;
+    $("approval-panel").hidden = true;
+    $("artifacts-panel").hidden = true;
+  }
+}
+
+async function setResultView(view) {
+  if (view === "off" && $("unprotected-tab").disabled) return;
+  resultView = view;
+  showSelectedResult();
+  if (view !== "off" || comparisonRun || comparisonStarting) return;
+  comparisonStarting = true;
+  const epoch = resultEpoch, parentId = protectedRun.id;
+  $("comparison-loading").textContent = "Running the firewall-off comparison…";
+  try {
+    const run = await request(`/api/runs/${parentId}/comparison`, {});
+    if (epoch !== resultEpoch) return;
+    comparisonRun = run;
+    if (resultView === "off") showSelectedResult();
+    await pollComparison(run.id, epoch);
+  } catch (problem) {
+    if (epoch !== resultEpoch) return;
+    $("comparison-loading").textContent = `Comparison could not start: ${problem.message} Select Protected, then Firewall off to retry.`;
+    error(problem.message);
+  } finally {
+    if (epoch === resultEpoch) comparisonStarting = false;
+  }
+}
+
+async function pollComparison(runId, epoch) {
+  try {
+    const run = await request(`/api/runs/${runId}`);
+    if (epoch !== resultEpoch || comparisonRun?.id !== runId) return;
+    comparisonRun = run;
+    if (resultView === "off") showSelectedResult();
+    if (!["completed", "failed"].includes(run.status)) comparisonTimer = setTimeout(() => pollComparison(runId, epoch), 900);
+  } catch (problem) {
+    if (epoch === resultEpoch) error(problem.message);
+  }
+}
+
+for (const [view, id] of [["protected", "protected-tab"], ["off", "unprotected-tab"]]) {
+  $(id).addEventListener("click", () => setResultView(view));
+  $(id).addEventListener("keydown", (event) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const next = event.key === "Home" ? "protected" : event.key === "End" ? "off" : resultView === "off" ? "protected" : "off";
+    if (next === "off" && $("unprotected-tab").disabled) return;
+    setResultView(next);
+    $(next === "off" ? "unprotected-tab" : "protected-tab").focus();
+  });
+}
+
 function render(run) {
+  const previousId = currentRun?.id;
   currentRun = run;
+  const firewallOff = run.firewall_enabled === false;
   const metrics = metricsFor(run);
   const events = Array.isArray(run.events) ? run.events : [];
   const pending = Array.isArray(run.pending) ? run.pending : [];
-  const signature = JSON.stringify([run.id, run.status, events.length, pending.map((item) => item.id), run.error]);
+  const signature = JSON.stringify([run.id, run.status, events.length, pending.map((item) => item.id), run.error, run.task_review]);
   if (signature === renderSignature) return;
   renderSignature = signature;
+  $("result-heading").textContent = firewallOff ? "Firewall-off result" : "Defense result";
+  $("execution-label").textContent = `${run.mode === "replay" ? "SCRIPTED REPLAY" : "LIVE OPENAI"}${firewallOff ? " · FIREWALL OFF" : ""}`;
   setBadge($("run-status"), run.status, run.status);
-  $("blocked-count").textContent = metrics.tool_actions_stopped;
-  $("finding-count").textContent = metrics.review_findings;
-  $("quarantine-count").textContent = metrics.source_quarantined ? "1" : "0";
-  $("quarantine-count").setAttribute("aria-label", `Quarantined sources: ${metrics.source_quarantined ? 1 : 0}`);
-  $("quarantine-tooltip").textContent = quarantineDescription(run);
+  $("blocked-count").textContent = `${metrics.tool_calls} / ${metrics.blocked_tool_calls}`;
+  $("blocked-count").setAttribute("aria-label", `${metrics.tool_calls} tool calls, ${metrics.blocked_tool_calls} blocked`);
+  $("request-count").textContent = firewallOff ? "Off" : metrics.unsafe_requests_detected;
+  $("executed-count").textContent = metrics.actions_executed;
+  $("finding-count").textContent = firewallOff ? "Off" : metrics.review_findings;
+  $("quarantine-count").textContent = firewallOff ? "Off" : metrics.quarantined_sources;
+  $("quarantine-count").setAttribute("aria-label", firewallOff ? "Quarantine disabled" : `Quarantined sources: ${metrics.quarantined_sources}`);
+  $("quarantine-tooltip").textContent = firewallOff ? "Quarantine is disabled in this mock comparison. Source contents are returned without screening." : quarantineDescription(run);
   $("sent-count").textContent = metrics.mock_sends;
   $("event-count").textContent = `${run.events.length} EVENTS`;
   $("export").disabled = false;
   $("run-error").hidden = !run.error;
   $("run-error").textContent = run.error;
+  if (run.task_review && !firewallOff) {
+    const labels = {outside_permissions: "Outside permissions", sensitive_input: "Sensitive input", no_conflict_detected: "No conflict detected"};
+    $("task-verdict").textContent = labels[run.task_review.verdict] || "Not checked";
+    $("task-verdict").className = run.task_review.verdict === "no_conflict_detected" ? "risk-benign" : "risk-warning";
+    $("task-review-note").textContent = run.task_review.note;
+  } else {
+    $("task-verdict").textContent = "Not checked";
+    $("task-verdict").className = "";
+    $("task-review-note").textContent = firewallOff ? "Task-permission checks are disabled in this mock comparison." : "The user-task check has not finished.";
+  }
   if (run.review) {
     $("verdict").textContent = run.review.risk[0].toUpperCase() + run.review.risk.slice(1);
     $("verdict").className = run.review.quarantine ? "risk-warning" : "risk-benign";
-    const toolDenials = metrics.tool_actions_stopped;
-    const actualBlockedCalls = metrics.blocked_tool_calls;
-    $("review-note").textContent = run.review.quarantine
-      ? `Source quarantined at screening. ${toolDenials ? `${toolDenials} unsafe tool action${toolDenials === 1 ? " was" : "s were"} stopped; ${actualBlockedCalls} call${actualBlockedCalls === 1 ? " reached" : "s reached"} the tool gate and were blocked.` : "No named unsafe tool action or blocked tool call was recorded. Sensitive actions were still disabled before execution."}`
-      : run.review.note;
+    const count = (number, label) => `${number} ${label}${number === 1 ? "" : "s"}`;
+    $("review-note").textContent = `${metrics.quarantined_sources ? "Quarantine disables drafting and sending for the whole run. " : ""}${count(metrics.unsafe_requests_detected, "inferred unsafe request")} · ${count(metrics.blocked_tool_calls, "blocked tool call")} · ${count(metrics.actions_executed, "executed action")}.`;
+  } else {
+    $("verdict").textContent = "Not screened";
+    $("verdict").className = "";
+    $("review-note").textContent = firewallOff ? "Source contents are passed to the mock agent without review. Tools run without the protected gate; no human approval is requested." : "Reviewing untrusted content…";
   }
   if (run.summary) {
     $("summary").textContent = run.summary;
     $("summary").className = "summary";
   } else if (run.status === "failed") {
     $("summary").textContent = "The run stopped. Review the error and decision log.";
+    $("summary").className = "summary empty";
+  } else {
+    $("summary").textContent = "Waiting for agent response…";
+    $("summary").className = "summary empty";
   }
-  const expanded = new Set([...$("events").querySelectorAll(".event-disclosure[open]")].map((node) => node.dataset.sequence));
+  $("action-status").hidden = !run.action_status || run.action_status.state === "not_started";
+  $("action-status-message").textContent = run.action_status?.message || "";
+  const expanded = new Set(previousId === run.id ? [...$("events").querySelectorAll(".event-disclosure[open]")].map((node) => node.dataset.sequence) : []);
   $("events").replaceChildren(...events.map((event) => {
     const row = element("div", "event");
     const disclosure = element("details", "event-disclosure");
@@ -246,8 +398,12 @@ function render(run) {
     disclosure.open = expanded.has(disclosure.dataset.sequence);
     const summary = element("summary", "event-summary");
     const heading = element("div", "event-heading");
-    const decisionLabels = {approval_required: "APPROVAL NEEDED", quarantined: "QUARANTINED", allowed: "ALLOWED", blocked: "BLOCKED", info: "INFO"};
-    heading.append(element("span", `badge ${badgeClass(event.decision)}`, decisionLabels[event.decision] || event.decision.replaceAll("_", " ").toUpperCase()), element("span", "event-stage", STAGE_LABELS[event.stage] || event.stage));
+    const decisionLabels = {approval_required: "APPROVAL NEEDED", quarantined: "QUARANTINED", allowed: "ALLOWED", blocked: "BLOCKED", info: "INFO", detected: "DETECTED", executed: "EXECUTED"};
+    const stageLabel = firewallOff && event.stage === "tool" ? "Tool dispatch" : STAGE_LABELS[event.stage] || event.stage;
+    heading.append(element("span", `badge ${badgeClass(event.decision)}`, decisionLabels[event.decision] || event.decision.replaceAll("_", " ").toUpperCase()), element("span", "event-stage", stageLabel));
+    if (event.details?.tool) heading.append(element("code", "event-tool", event.details.tool));
+    const documentId = event.details?.document_id || event.details?.arguments?.document_id;
+    if (documentId) heading.append(element("code", "event-tool", documentId));
     summary.append(heading, element("p", "", event.message), element("span", "event-toggle", "Show recorded checks"));
     disclosure.append(summary);
     const detailPanel = element("div", "event-inspector");
@@ -290,7 +446,10 @@ function renderApprovals(run) {
         controls.querySelectorAll("button").forEach((item) => { item.disabled = true; });
         try {
           const updated = await request(`/api/runs/${runId}/approval`, {action_id: action.id, approve: approved});
-          if (currentRun?.id === runId) render(updated);
+          if (protectedRun?.id === runId) {
+            protectedRun = updated;
+            if (resultView === "protected") showSelectedResult();
+          }
         } catch (problem) {
           error(problem.message);
           controls.querySelectorAll("button").forEach((item) => { item.disabled = false; });
@@ -316,9 +475,11 @@ function renderArtifacts(run) {
 async function poll(runId) {
   try {
     const run = await request(`/api/runs/${runId}`);
-    if (currentRun?.id !== runId) return;
-    render(run);
-    if (["completed", "failed", "awaiting_approval"].includes(run.status)) {
+    if (protectedRun?.id !== runId) return;
+    protectedRun = run;
+    updateTabs();
+    if (resultView === "protected") showSelectedResult();
+    if (terminalStatuses.includes(run.status)) {
       running = false;
       $("run").disabled = false;
       $("run").replaceChildren(document.createTextNode("Run defense demo "), element("span", "", "→"));
@@ -342,8 +503,9 @@ $("run").addEventListener("click", async () => {
   $("run").disabled = true;
   $("run").textContent = "Running checks…";
   try {
-    const run = await request("/api/runs", {mode: $("mode").value, scenario_id: $("scenario").value, task: $("task").value, document: $("document").value, allow_draft: $("allow-draft").checked, allow_send: $("allow-send").checked});
-    render(run);
+    const run = await request("/api/runs", {mode: $("mode").value, scenario_id: $("scenario").value, task_mode: $("task-mode").value, required_document: $("required-document").value, task: $("task").value, document: $("document").value, allow_draft: $("allow-draft").checked, allow_send: $("allow-send").checked});
+    protectedRun = run;
+    showSelectedResult();
     await poll(run.id);
   } catch (problem) {
     running = false;
@@ -383,10 +545,35 @@ $("document").addEventListener("input", markCustom);
 $("task").addEventListener("input", markCustom);
 $("scenario").addEventListener("change", selectScenario);
 $("mode").addEventListener("change", modeHelp);
+$("task-mode").addEventListener("change", taskModeHelp);
+
+$("evaluate").addEventListener("click", async () => {
+  $("evaluate").disabled = true;
+  $("evaluate").textContent = "Checking scenarios…";
+  error("");
+  try {
+    const report = await request("/api/evaluations", {});
+    $("evaluation-panel").hidden = false;
+    setBadge($("evaluation-status"), `${report.passed}/${report.total} passed`, report.passed === report.total ? "allowed" : "blocked");
+    $("evaluation-summary").textContent = `${report.unauthorized_executions} unauthorized actions executed · ${report.task_checks_passed}/${report.total} replay task checks passed · ${report.false_positives}/${report.benign_controls} benign controls quarantined.`;
+    $("evaluation-cases").replaceChildren(...report.cases.map((item) => {
+      const row = element("tr");
+      row.append(element("td", "", item.name.replace(/^\d+\s*\/\s*/, "")), element("td", item.passed ? "risk-benign" : "risk-warning", item.passed ? "PASS" : "FAIL"), element("td", "", String(item.blocked_calls)), element("td", "", item.protections.map((rule) => RULE_LABELS[rule] || rule.replaceAll("_", " ")).join("; ") || "No intervention needed"));
+      return row;
+    }));
+    $("evaluation-panel").scrollIntoView({behavior: "smooth", block: "start"});
+  } catch (problem) { error(problem.message); }
+  finally { $("evaluate").disabled = false; $("evaluate").textContent = "Run regression report →"; }
+});
 
 async function init() {
   try {
     config = await request("/api/config");
+    for (const id of config.public_document_ids || []) {
+      const option = element("option", "", id);
+      option.value = id;
+      $("required-document").append(option);
+    }
     $("scenario").replaceChildren(...config.scenarios.map((scenario) => {
       const option = element("option", "", scenario.name);
       option.value = scenario.id;

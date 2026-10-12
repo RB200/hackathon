@@ -14,9 +14,11 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from defense.engine import Engine, Run
-from defense.fixtures import SCENARIOS, public_scenarios
+from defense.fixtures import PUBLIC_DOCUMENTS, SCENARIOS, public_scenarios
 from defense.provider import OpenAIProvider
 from defense.security import DLP, Policy
+from defense.evaluation import evaluate
+from defense.comparison import ComparisonEngine
 
 ROOT = Path(__file__).resolve().parent
 
@@ -44,13 +46,14 @@ class App:
         self.runs = {}
         self.lock = threading.RLock()
         self.slots = threading.BoundedSemaphore(2)
+        self.comparisons = {}
 
     def config(self):
         return {"csrf_token": self.csrf, "live_available": bool(self.provider.api_key), "agent_model": self.provider.agent_model,
-                "reviewer_model": self.provider.reviewer_model, "allowed_recipients": sorted(self.recipients), "scenarios": public_scenarios()}
+                "reviewer_model": self.provider.reviewer_model, "allowed_recipients": sorted(self.recipients), "public_document_ids": sorted(PUBLIC_DOCUMENTS), "scenarios": public_scenarios()}
 
     def create(self, data):
-        if not isinstance(data, dict) or set(data) - {"mode", "task", "document", "allow_draft", "allow_send", "scenario_id"}:
+        if not isinstance(data, dict) or set(data) - {"mode", "task", "document", "allow_draft", "allow_send", "scenario_id", "task_mode", "required_document"}:
             raise ValueError("Unexpected run fields.")
         for key, limit in (("task", 2000), ("document", 20000)):
             if not isinstance(data.get(key), str) or not data[key].strip() or len(data[key]) > limit:
@@ -60,6 +63,12 @@ class App:
         for key in ("allow_draft", "allow_send"):
             if type(data.get(key, False)) is not bool:
                 raise ValueError("Permissions must be booleans.")
+        task_mode = data.get("task_mode", "summarize")
+        if not isinstance(task_mode, str) or task_mode not in {"summarize", "draft", "send"}:
+            raise ValueError("Choose summarize, draft, or send task mode.")
+        required_document = data.get("required_document", "")
+        if not isinstance(required_document, str) or (required_document and required_document not in PUBLIC_DOCUMENTS):
+            raise ValueError("The required reference must be a public document ID.")
         scenario_id = data.get("scenario_id", "custom")
         if not isinstance(scenario_id, str) or len(scenario_id) > 50:
             raise ValueError("Invalid scenario.")
@@ -73,7 +82,7 @@ class App:
         if not self.slots.acquire(blocking=False):
             raise ValueError("Two runs are already active. Wait for a run to finish.")
         try:
-            run = Run(data["mode"], data["task"], data["document"], Policy(data.get("allow_draft", False), data.get("allow_send", False), self.recipients), self.dlp, scenario_id)
+            run = Run(data["mode"], data["task"], data["document"], Policy(data.get("allow_draft", False), data.get("allow_send", False), self.recipients, task_mode=task_mode, required_document=required_document), self.dlp, scenario_id)
             with self.lock:
                 # Bound memory; do not remove active or pending runs.
                 removable = [item for item in self.runs.values() if item.status in {"completed", "failed"}]
@@ -81,6 +90,7 @@ class App:
                     if len(self.runs) < 50:
                         break
                     del self.runs[old.id]
+                    self.comparisons = {parent: child for parent, child in self.comparisons.items() if old.id not in {parent, child}}
                 if len(self.runs) >= 50:
                     raise ValueError("Run storage is full. Resolve pending approvals or restart the demo.")
                 self.runs[run.id] = run
@@ -92,7 +102,44 @@ class App:
 
     def work(self, run):
         try:
-            self.engine.execute(run)
+            if run.firewall_enabled:
+                self.engine.execute(run)
+            else:
+                ComparisonEngine(self.provider, self.dlp).execute(run)
+        finally:
+            self.slots.release()
+
+    def compare(self, run_id, data):
+        if data != {}:
+            raise ValueError("Comparison uses the original run inputs; overrides are not accepted.")
+        original = self.get(run_id)
+        with self.lock:
+            if not original.firewall_enabled:
+                raise ValueError("Select a protected run to compare.")
+            if original.status not in {"completed", "failed", "awaiting_approval"}:
+                raise ValueError("Wait for the protected run to finish.")
+            previous_id = self.comparisons.get(run_id)
+            if previous_id and previous_id in self.runs:
+                return self.runs[previous_id].snapshot()
+            if len(self.runs) >= 50:
+                raise ValueError("Run storage is full. Restart the demo to clear it.")
+            if not self.slots.acquire(blocking=False):
+                raise ValueError("Two runs are already active. Wait for a run to finish.")
+            try:
+                comparison = Run(original.mode, original.task, original.document, original.policy, self.dlp, original.scenario_id, firewall_enabled=False, comparison_of=original.id)
+                self.runs[comparison.id] = comparison
+                self.comparisons[original.id] = comparison.id
+                threading.Thread(target=self.work, args=(comparison,), daemon=True).start()
+            except Exception:
+                self.slots.release()
+                raise
+        return comparison.snapshot()
+
+    def evaluate(self):
+        if not self.slots.acquire(blocking=False):
+            raise ValueError("Two runs are already active. Wait for a run to finish.")
+        try:
+            return evaluate(self.engine, self.recipients)
         finally:
             self.slots.release()
 
@@ -186,9 +233,15 @@ class Handler(BaseHTTPRequestHandler):
             path = urlparse(self.path).path
             if path == "/api/runs":
                 return self.reply(202, app.create(data))
+            if path == "/api/evaluations":
+                if data != {}:
+                    raise ValueError("The offline regression report takes no parameters.")
+                return self.reply(200, app.evaluate())
             parts = path.strip("/").split("/")
             if len(parts) == 4 and parts[:2] == ["api", "runs"] and parts[3] == "approval":
                 return self.reply(200, app.decide(parts[2], data))
+            if len(parts) == 4 and parts[:2] == ["api", "runs"] and parts[3] == "comparison":
+                return self.reply(202, app.compare(parts[2], data))
             return self.reply(404, {"error": "Not found."})
         except (ValueError, TypeError, UnicodeDecodeError) as error:
             return self.reply(400, {"error": app.dlp.redact(str(error))[:200]})
