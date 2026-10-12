@@ -177,7 +177,7 @@ class App:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "AgentGate/1.0"
+    server_version = "PromptGuardian/1.0"
 
     def log_message(self, format, *args):
         # Do not write document content, query strings or credentials to console.
@@ -264,7 +264,7 @@ def main():
     port = int(os.environ.get("PORT", "8000"))
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     server.app = app
-    print(f"Agent Gate: http://127.0.0.1:{server.server_port}", flush=True)
+    print(f"Prompt Guardian: http://127.0.0.1:{server.server_port}", flush=True)
     print(f"Agent: {app.provider.agent_model} | Reviewer: {app.provider.reviewer_model} | Live API: {'configured' if app.provider.api_key else 'not configured; use offline replay'}", flush=True)
     try:
         server.serve_forever()
