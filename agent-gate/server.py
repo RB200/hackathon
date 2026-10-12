@@ -14,9 +14,9 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from defense.engine import Engine, Run
-from defense.fixtures import PUBLIC_DOCUMENTS, SCENARIOS, public_scenarios
+from defense.fixtures import PUBLIC_DOCUMENTS, DEMO_SCENARIOS, public_scenarios
 from defense.provider import OpenAIProvider
-from defense.security import DLP, Policy
+from defense.security import DLP, Policy, grants_for_task, task_mode_for_grants
 from defense.evaluation import evaluate
 from defense.comparison import ComparisonEngine
 
@@ -53,26 +53,20 @@ class App:
                 "reviewer_model": self.provider.reviewer_model, "allowed_recipients": sorted(self.recipients), "public_document_ids": sorted(PUBLIC_DOCUMENTS), "scenarios": public_scenarios()}
 
     def create(self, data):
-        if not isinstance(data, dict) or set(data) - {"mode", "task", "document", "allow_draft", "allow_send", "scenario_id", "task_mode", "required_document"}:
+        if not isinstance(data, dict) or set(data) - {"mode", "task", "document", "scenario_id", "required_document"}:
             raise ValueError("Unexpected run fields.")
         for key, limit in (("task", 2000), ("document", 20000)):
             if not isinstance(data.get(key), str) or not data[key].strip() or len(data[key]) > limit:
                 raise ValueError(f"{key} must be nonempty text, at most {limit} characters.")
         if data.get("mode") not in {"live", "replay"}:
             raise ValueError("Choose live or replay mode.")
-        for key in ("allow_draft", "allow_send"):
-            if type(data.get(key, False)) is not bool:
-                raise ValueError("Permissions must be booleans.")
-        task_mode = data.get("task_mode", "summarize")
-        if not isinstance(task_mode, str) or task_mode not in {"summarize", "draft", "send"}:
-            raise ValueError("Choose summarize, draft, or send task mode.")
         required_document = data.get("required_document", "")
         if not isinstance(required_document, str) or (required_document and required_document not in PUBLIC_DOCUMENTS):
             raise ValueError("The required reference must be a public document ID.")
         scenario_id = data.get("scenario_id", "custom")
         if not isinstance(scenario_id, str) or len(scenario_id) > 50:
             raise ValueError("Invalid scenario.")
-        fixture = next((item for item in SCENARIOS if item["id"] == scenario_id), None)
+        fixture = next((item for item in DEMO_SCENARIOS if item["id"] == scenario_id), None)
         if scenario_id != "custom" and not fixture:
             raise ValueError("Unknown scenario.")
         if data["mode"] == "replay" and fixture and (data["document"] != fixture["document"] or data["task"] != fixture["task"]):
@@ -82,7 +76,12 @@ class App:
         if not self.slots.acquire(blocking=False):
             raise ValueError("Two runs are already active. Wait for a run to finish.")
         try:
-            run = Run(data["mode"], data["task"], data["document"], Policy(data.get("allow_draft", False), data.get("allow_send", False), self.recipients, task_mode=task_mode, required_document=required_document), self.dlp, scenario_id)
+            granted_tools = grants_for_task(data["task"])
+            task_mode = task_mode_for_grants(granted_tools)
+            policy = Policy("draft_email" in granted_tools, "send_email" in granted_tools, self.recipients,
+                            task_mode=task_mode, required_document=required_document,
+                            allow_edit="edit_document" in granted_tools, granted_tools=granted_tools)
+            run = Run(data["mode"], data["task"], data["document"], policy, self.dlp, scenario_id)
             with self.lock:
                 # Bound memory; do not remove active or pending runs.
                 removable = [item for item in self.runs.values() if item.status in {"completed", "failed"}]

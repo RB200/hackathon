@@ -578,8 +578,9 @@ class HTTPTests(unittest.TestCase):
 
     def create_run(self, scenario="approval"):
         fixture = next(item for item in SCENARIOS if item["id"] == scenario)
-        data = {key: fixture[key] for key in ["task", "document", "allow_draft", "allow_send", "task_mode", "required_document"]}
-        data.update(mode="replay", scenario_id=fixture["id"])
+        data = {key: fixture[key] for key in ["task", "document", "required_document"]}
+        # Approval remains a boundary test fixture; it is no longer a public preset.
+        data.update(mode="replay", scenario_id="custom" if scenario == "approval" else fixture["id"])
         status, body, _ = self.request("/api/runs", data)
         self.assertEqual(status, 202, body)
         run_id = json.loads(body)["id"]
@@ -587,6 +588,13 @@ class HTTPTests(unittest.TestCase):
         while time.monotonic() < deadline:
             snapshot = self.app.get(run_id).snapshot()
             if snapshot["status"] in {"completed", "awaiting_approval", "failed"}:
+                if scenario == "approval":
+                    run = self.app.get(run_id)
+                    with run.lock:
+                        for name, args in fixture["replay"]:
+                            run.gate.dispatch(name, args)
+                        run.status = "awaiting_approval" if run.gate.pending else "completed"
+                    return run.snapshot()
                 return snapshot
             time.sleep(.01)
         self.fail("Run did not finish")
@@ -647,10 +655,10 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(self.request("/api/evaluations", {"mode": "live"})[0], 400)
         self.assertEqual(self.request("/api/evaluations", {}, {"X-CSRF-Token": "wrong"})[0], 403)
 
-    def test_task_mode_is_validated_and_legacy_requests_default_to_read_only(self):
-        common = {"mode": "replay", "document": BASE_DOCUMENT, "task": "Summarize.", "allow_draft": True, "allow_send": True}
-        for mode in ["admin", {"mode": "send"}, None]:
-            self.assertEqual(self.request("/api/runs", {**common, "task_mode": mode})[0], 400)
+    def test_task_scope_is_derived_from_user_task_and_cannot_be_forged(self):
+        common = {"mode": "replay", "document": BASE_DOCUMENT, "task": "Summarize."}
+        for field, value in (("task_mode", "send"), ("allow_draft", True), ("allow_send", True), ("allow_edit", True)):
+            self.assertEqual(self.request("/api/runs", {**common, field: value})[0], 400)
         for reference in ["secrets.env", "../.env", ["release-notes"], None]:
             self.assertEqual(self.request("/api/runs", {**common, "required_document": reference})[0], 400)
         status, body, _ = self.request("/api/runs", common)
@@ -659,6 +667,12 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(policy["task_mode"], "summarize")
         self.assertFalse(policy["allow_draft"])
         self.assertFalse(policy["allow_send"])
+        status, body, _ = self.request("/api/runs", {**common, "task": "Send a short launch summary to team@example.com."})
+        self.assertEqual(status, 202)
+        policy = json.loads(body)["policy"]
+        self.assertEqual(policy["task_mode"], "send")
+        self.assertTrue(policy["allow_draft"])
+        self.assertTrue(policy["allow_send"])
 
 
 if __name__ == "__main__":

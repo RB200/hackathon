@@ -17,19 +17,20 @@
 .metrics > div { padding: 14px 12px; }
 .metrics .metric-verdict > span { min-height: 0; margin-bottom: 14px; }
 .task-review-note { margin: 9px 0 0; font-size: 11px; line-height: 1.6; color: var(--muted); overflow-wrap: anywhere; }
-.secondary { width: 100%; margin-top: 22px; padding: 10px 12px; border: 1px solid #a8edcc55; border-radius: 4px; color: var(--mint); background: transparent; font-size: 12px; text-align: left; }
-.secondary:hover { background: #a8edcc08; }
 .action-status { margin-top: 16px; border-left: 2px solid var(--mint); background: #a8edcc08; padding: 10px 12px; font-size: 11px; }
 .action-status strong { color: var(--mint); font-size: 10px; }
 .action-status p { color: var(--muted); margin: 5px 0 0; line-height: 1.6; }
-.checkbox:has(input:disabled) { opacity: .5; }
 .event-tool { color: var(--mint); font: 10px var(--mono); overflow-wrap: anywhere; }
+.edit-diff { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 14px 0; }
+.edit-diff > div { min-width: 0; padding: 10px; border: 1px solid var(--line); border-radius: 3px; }
+.edit-removed { border-left: 2px solid #e9bd70 !important; }
+.edit-added { border-left: 2px solid var(--mint) !important; }
+.edit-diff pre { margin-bottom: 0; }
+.edit-contents { margin: 12px 0; color: var(--muted); font-size: 11px; }
+.edit-contents summary { cursor: pointer; }
+.edit-contents h4 { color: var(--text); margin-bottom: 8px; }
+@media (max-width: 760px) { .edit-diff { grid-template-columns: 1fr; } }
 .finding-signals { padding: 5px 0; }
-.report-scroll { overflow-x: auto; }
-.report-table { width: 100%; border-collapse: collapse; font-size: 11px; }
-.report-table th { text-align: left; color: var(--muted); font-weight: 500; }
-.report-table td, .report-table th { padding: 10px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
-.report-table td:last-child { color: var(--muted); min-width: 160px; }
 
 .metrics > div {
   min-width: 0;

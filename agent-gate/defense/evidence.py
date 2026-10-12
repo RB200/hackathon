@@ -3,15 +3,11 @@
 import copy
 import re
 
+from .tools import TOOL_REGISTRY, UNAVAILABLE_TOOL_PATTERNS
 
-TOOL_PATTERNS = {
-    "read_document": r"\b(?:read|fetch|retrieve|open|access|load)\b.{0,100}\b(?:secrets?\.env|files?|documents?|credentials?|api key|password|secret)\b",
-    "search_knowledge": r"\b(?:search|look up|find)\b.{0,80}\b(?:knowledge|handbook|documents?|information|records?)\b",
-    "draft_email": r"\b(?:draft|compose|write)\b.{0,40}\b(?:an? )?email\b",
-    "send_email": r"\b(?:send|deliver|forward|email|transmit)\b.{0,140}\b(?:to\s+\S+@\S+|attacker|external|outside|recipient)\b",
-    "delete_document": r"\b(?:delete|remove|erase)\b.{0,80}\b(?:files?|documents?|records?)\b",
-    "execute_shell": r"\b(?:run|execute)\b.{0,40}\b(?:shell|command|script|terminal)\b",
-}
+
+TOOL_PATTERNS = {name: spec["intent_pattern"] for name, spec in TOOL_REGISTRY.items()}
+TOOL_PATTERNS.update(UNAVAILABLE_TOOL_PATTERNS)
 NEGATION = re.compile(r"\b(?:do not|don't|never|must not|should not|cannot|can't|avoid|without)\b[^,;.!?\n]{0,90}$", re.I)
 EDUCATIONAL = re.compile(r"\b(?:example|training|educational|quoted|documentation|illustration)\b", re.I)
 QUOTED = re.compile(r'"[^"\n]+"|“[^”\n]+”|`[^`\n]+`|\'[^\'\n]+\'')
@@ -50,16 +46,17 @@ def is_reference_or_negated(text, start, end):
 
 
 def requested_tools(text):
-    names = set()
+    found = set()
     for name, pattern in TOOL_PATTERNS.items():
         for match in re.finditer(pattern, text, re.I):
             if not is_reference_or_negated(text, match.start(), match.end()):
-                names.add(name)
-    explicit = r"\b(?:use|call|invoke|run|execute)\s+(?:the\s+)?(read_document|search_knowledge|draft_email|send_email|delete_document|execute_shell)\b"
+                found.add(name)
+    tool_names_pattern = "|".join(re.escape(name) for name in TOOL_PATTERNS)
+    explicit = rf"\b(?:use|call|invoke|run|execute)\s+(?:the\s+)?({tool_names_pattern})\b"
     for match in re.finditer(explicit, text, re.I):
         if not is_reference_or_negated(text, match.start(), match.end()):
-            names.add(match.group(1).lower())
-    return sorted(names)
+            found.add(match.group(1).lower())
+    return sorted(found)
 
 
 def annotate_requested_tools(findings, document=""):

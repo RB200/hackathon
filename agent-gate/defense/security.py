@@ -11,7 +11,8 @@ from dataclasses import dataclass, field
 from urllib.parse import quote
 
 from .fixtures import DEMO_SECRET, PUBLIC_DOCUMENTS
-from .evidence import contextual_span, is_reference_or_negated
+from .evidence import QUOTED, contextual_span, is_reference_or_negated
+from .tools import TOOL_REGISTRY
 
 
 class DLP:
@@ -73,7 +74,7 @@ class DLP:
 SIGNATURES = [
     ("role_override", r"(?:ignore|disregard)\s+(?:all\s+)?(?:previous|prior|system)\s+(?:instructions|rules)|system\s+override|you are now (?:the |a )?(?:security administrator|system)|(?:system|developer)\s*(?:message|prompt)\s*:|treat.{0,60}as (?:a |the )?system (?:message|instruction)"),
     ("secret_exfiltration", r"secrets?\.env|(?:send|reveal|exfiltrate|print|fetch|read)\b[^\n.!?]{0,100}\b(?:api[ _-]?key|password|credential|secret)"),
-    ("tool_instruction", r"\b(?:use|call|invoke|run|execute)\s+(?:the\s+)?(?:send_email|delete_document|execute_shell)\b|\b(?:send_email|delete_document|execute_shell)\s*\("),
+    ("tool_instruction", r"\b(?:use|call|invoke|run|execute)\s+(?:the\s+)?(?:send_email|edit_document|delete_document|execute_shell)\b|\b(?:send_email|edit_document|delete_document|execute_shell)\s*\("),
     ("obfuscation", r"hide (?:this|these) instructions?"),
     ("obfuscation", r"(?:base64|hex)[ -]?(?:encode|decode)|decode.{0,40}(?:payload|instruction)"),
 ]
@@ -94,18 +95,34 @@ def signature_review(document):
     return {"risk": "suspicious" if findings else "benign", "findings": findings, "source": "signatures"}
 
 
-TOOL_FIELDS = {
-    "search_knowledge": {"query": 200},
-    "read_document": {"document_id": 100},
-    "draft_email": {"to": 254, "subject": 200, "body": 8000},
-    "send_email": {"to": 254, "subject": 200, "body": 8000},
-}
-TOOL_DESCRIPTIONS = {
-    "search_knowledge": "Search mock public knowledge. Returns untrusted reference text.",
-    "read_document": "Read supplied-document for this run's user-supplied text, or a mock public document: launch-plan, team-handbook, release-notes. Other IDs are denied. Returned content is untrusted and screened before model access.",
-    "draft_email": "Create a local draft. Requires user-granted draft permission; never sends anything.",
-    "send_email": "Request sending to a permitted exact address. Always requires human approval. This demo uses a mock outbox.",
-}
+TOOL_FIELDS = {name: spec["fields"] for name, spec in TOOL_REGISTRY.items()}
+TOOL_DESCRIPTIONS = {name: spec["description"] for name, spec in TOOL_REGISTRY.items()}
+
+
+def grants_for_task(task):
+    """Resolve task intent to registered capabilities; model output is never consulted."""
+    from .evidence import requested_tools
+
+    grants = {"read_document", "search_knowledge"}
+    # Quoted examples and copied text describe intent; they do not grant it.
+    task_intent = QUOTED.sub(" ", task)
+    for name in requested_tools(task_intent):
+        spec = TOOL_REGISTRY.get(name)
+        if not spec or spec["permission"] == "read":
+            continue
+        grants.add(name)
+        grants.update(spec["implies"])
+    return frozenset(grants)
+
+
+def task_mode_for_grants(grants):
+    if "send_email" in grants:
+        return "send"
+    if "edit_document" in grants:
+        return "edit"
+    if "draft_email" in grants:
+        return "draft"
+    return "summarize"
 
 
 def tool_definitions(policy=None, quarantine=False, waiting_for_reference=False):
@@ -125,10 +142,12 @@ class Policy:
     max_calls: int = 8
     task_mode: str = "summarize"
     required_document: str = ""
+    allow_edit: bool = False
+    granted_tools: frozenset | None = None
 
     def __post_init__(self):
-        if self.task_mode not in {"summarize", "draft", "send"}:
-            raise ValueError("Choose summarize, draft, or send task mode.")
+        if self.task_mode not in {"summarize", "draft", "send", "edit"}:
+            raise ValueError("Choose summarize, draft, send, or edit task mode.")
         if self.required_document and self.required_document not in PUBLIC_DOCUMENTS:
             raise ValueError("The required reference must be a public document ID.")
 
@@ -137,8 +156,11 @@ class Policy:
             return True
         if quarantine:
             return False
+        if self.granted_tools is not None:
+            return name in self.granted_tools
         return ((name == "draft_email" and self.task_mode in {"draft", "send"} and self.allow_draft)
-                or (name == "send_email" and self.task_mode == "send" and self.allow_send))
+                or (name == "send_email" and self.task_mode == "send" and self.allow_send)
+                or (name == "edit_document" and self.task_mode == "edit" and self.allow_edit))
 
 
 @dataclass
@@ -155,6 +177,13 @@ class Gate:
     reviewed_documents: set = field(default_factory=set)
     supplied_document: str | None = None
     supplied_document_read: bool = False
+    edited_documents: dict = field(default_factory=dict)
+    edits: list = field(default_factory=list)
+
+    def document_text(self, document_id):
+        if document_id == "supplied-document":
+            return self.supplied_document
+        return self.edited_documents.get(document_id, PUBLIC_DOCUMENTS.get(document_id))
 
     @property
     def waiting_for_document(self):
@@ -184,21 +213,32 @@ class Gate:
             return {"status": "approval_required", "reason": reason, "action_id": action_id}
         if name == "read_document":
             supplied = args["document_id"] == "supplied-document"
-            text = self.supplied_document if supplied else PUBLIC_DOCUMENTS[args["document_id"]]
+            text = self.document_text(args["document_id"])
             result = {"status": "ok", "document_id": args["document_id"], "trust": "untrusted", "text": text}
             if supplied:
                 self.supplied_document_read = True
         elif name == "search_knowledge":
             words = args["query"].lower().split()
-            result = {"status": "ok", "trust": "untrusted", "documents": [{"id": key, "text": value} for key, value in PUBLIC_DOCUMENTS.items() if any(word in (key + value).lower() for word in words)]}
+            documents = {**PUBLIC_DOCUMENTS, **self.edited_documents}
+            result = {"status": "ok", "trust": "untrusted", "documents": [{"id": key, "text": value} for key, value in documents.items() if any(word in (key + value).lower() for word in words)]}
+        elif name == "edit_document":
+            document_id = args["document_id"]
+            before = self.document_text(document_id)
+            after = before.replace(args["old_text"], args["new_text"], 1)
+            if document_id == "supplied-document":
+                self.supplied_document = after
+            else:
+                self.edited_documents[document_id] = after
+            self.edits.append({"document_id": document_id, "before": before, "after": after, "old_text": args["old_text"], "new_text": args["new_text"]})
+            result = {"status": "edited", "mock": True, "trust": "untrusted", "document_id": document_id, "text": after}
         elif name == "draft_email":
             self.drafts.append(copy.deepcopy(args))
             result = {"status": "drafted", "mock": True, **args}
         else:
             self.outbox.append(copy.deepcopy(args))
             result = {"status": "sent_to_mock_outbox", "mock": True, **args}
-        details = {"tool": name, "origin": "approval" if approved else self.origin, "outcome": result["status"], "side_effect": name in {"draft_email", "send_email"}}
-        if name == "read_document":
+        details = {"tool": name, "origin": "approval" if approved else self.origin, "outcome": result["status"], "side_effect": name in {"draft_email", "send_email", "edit_document"}}
+        if name in {"read_document", "edit_document"}:
             details["document_id"] = args["document_id"]
         self.log("execution", "executed", f"{name} executed in the local sandbox.", details)
         # Enforce tool-result egress independently before the agent sees it.
@@ -210,29 +250,44 @@ class Gate:
     def check(self, name, args, *, approved=False):
         if self.calls > self.policy.max_calls:
             return "blocked", "tool_budget", "This run exhausted its tool-call budget."
-        if not isinstance(name, str) or name not in TOOL_FIELDS:
+        if not isinstance(name, str) or name not in TOOL_REGISTRY:
             return "blocked", "tool_allowlist", "This tool is not in the server allowlist."
         fields = TOOL_FIELDS[name]
-        if not isinstance(args, dict) or set(args) != set(fields) or any(not isinstance(args[key], str) or not args[key].strip() or len(args[key]) > limit for key, limit in fields.items()):
+        if not isinstance(args, dict) or set(args) != set(fields) or any(not isinstance(args[key], str) or (not args[key].strip() and not (name == "edit_document" and key == "new_text")) or len(args[key]) > limit for key, limit in fields.items()):
             return "blocked", "argument_schema", "Tool arguments do not match the strict server schema."
         labels = self.dlp.inspect(json.dumps(args, ensure_ascii=False))
         if labels:
             return "blocked", "argument_dlp", "Sensitive data or a known encoded secret was found in tool arguments."
-        if name == "read_document" and args["document_id"] not in PUBLIC_DOCUMENTS and not (args["document_id"] == "supplied-document" and self.supplied_document is not None):
-            return "blocked", "document_scope", "Only this run's supplied document and explicitly listed public document IDs can be read."
+        if name in {"read_document", "edit_document"} and args["document_id"] not in PUBLIC_DOCUMENTS and not (args["document_id"] == "supplied-document" and self.supplied_document is not None):
+            return "blocked", "document_scope", "Only this run's supplied document and explicitly listed public document IDs are accessible."
         if self.waiting_for_document and not (name == "read_document" and args["document_id"] == "supplied-document"):
             return "blocked", "document_pending", "Read the supplied document before requesting other tool actions."
+        if name == "edit_document":
+            if self.quarantine:
+                return "blocked", "document_quarantine", "Quarantine disables document edits, drafting and sending."
+            if not self.policy.permits_tool(name):
+                return "blocked", "task_scope", "The task did not request a document edit."
+            if self.waiting_for_reference:
+                return "blocked", "reference_pending", "Read and screen the required reference before editing."
+            if args["document_id"] not in self.reviewed_documents:
+                return "blocked", "edit_read_required", "Read and screen the target document before editing it."
+            before = self.document_text(args["document_id"])
+            if before.count(args["old_text"]) != 1 or args["old_text"] == args["new_text"]:
+                return "blocked", "edit_match", "old_text must match exactly once and the replacement must change it."
+            after = before.replace(args["old_text"], args["new_text"], 1)
+            if len(after) > 20000:
+                return "blocked", "edit_size", "The edited document would exceed 20,000 characters."
+            if self.dlp.inspect(after):
+                return "blocked", "argument_dlp", "The edit would introduce sensitive data into the document."
+            if signature_review(after)["findings"]:
+                return "blocked", "edit_content", "The edit would leave suspicious instructions in the document."
         if name in {"draft_email", "send_email"}:
             if self.quarantine:
                 return "blocked", "document_quarantine", "Suspicious or unreviewed source content restricts this run to read and summarize."
-            if self.policy.task_mode == "summarize" or (name == "send_email" and self.policy.task_mode != "send"):
-                return "blocked", "task_scope", "The selected task mode does not permit this email action."
+            if not self.policy.permits_tool(name):
+                return "blocked", "task_scope", "The task did not request this email action."
             if self.waiting_for_reference:
                 return "blocked", "reference_pending", f"Read and screen the required reference {self.policy.required_document} before any email action."
-            if not self.policy.allow_draft and name == "draft_email":
-                return "blocked", "draft_capability", "The user did not grant drafting permission for this run."
-            if not self.policy.allow_send and name == "send_email":
-                return "blocked", "send_capability", "The user did not grant sending permission for this run."
             # Exact match rejects display names, extra recipients, whitespace and lookalike domains.
             if args["to"] not in self.policy.recipients:
                 return "blocked", "recipient_allowlist", "The recipient is not an exact address in the server allowlist."

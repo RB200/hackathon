@@ -4,6 +4,13 @@ const $ = (id) => document.getElementById(id);
 let config, currentRun = null, timer = null, renderSignature = "", running = false;
 let protectedRun = null, comparisonRun = null, resultView = "protected", comparisonTimer = null, comparisonStarting = false, resultEpoch = 0;
 const terminalStatuses = ["completed", "failed", "awaiting_approval"];
+const SCENARIO_SUMMARIES = {
+  benign: "Read and summarize a clean document.",
+  injection: "Quarantine instructions hidden in a document.",
+  "tool-misuse": "Reject an unauthorized deletion request.",
+  "document-edit": "Change Friday to Monday in a mock file.",
+  "edit-injection": "Block an injected budget change.",
+};
 
 const FINDING_GUIDANCE = {
   role_override: {label: "Tries to change the AI’s instructions", explanation: "This document asks the AI to ignore its assigned rules or take on a different role."},
@@ -31,6 +38,7 @@ const DETAIL_LABELS = {
   mode: "Execution mode",
   characters: "Document length",
   permissions_source: "Permission source",
+  granted_tools: "Tools authorized from task",
   risk: "Screening verdict",
   source: "Review method",
   findings: "Review evidence",
@@ -46,8 +54,8 @@ const DETAIL_LABELS = {
   attempt: "Tool attempt",
   action_id: "Approval action",
   source_id: "Source document",
-  document_id: "Document read",
-  task_mode: "Selected task",
+  document_id: "Target document",
+  task_mode: "Task intent",
   outcome: "Execution outcome",
   cached: "Previously reviewed",
   side_effect: "Created or sent a mock artifact",
@@ -58,7 +66,12 @@ const RULE_LABELS = {
   provider_input_dlp: "Sensitive input removed before model access",
   document_scope: "Only the supplied document and listed public documents may be read",
   document_pending: "Supplied document must be read before continuing",
-  document_quarantine: "Quarantine disables drafting and sending",
+  document_quarantine: "Quarantine disables editing, drafting and sending",
+  edit_capability: "Editing permission was not granted",
+  edit_read_required: "Read and screen the edit target first",
+  edit_match: "Replacement text must match exactly once",
+  edit_size: "Edited document exceeds its size limit",
+  edit_content: "Edited document contains suspicious instructions",
   tool_allowlist: "Tool is not on the server allowlist",
   argument_schema: "Tool arguments did not match the required schema",
   argument_dlp: "Sensitive content found in tool arguments",
@@ -66,8 +79,8 @@ const RULE_LABELS = {
   send_capability: "Sending permission was not granted",
   recipient_allowlist: "Recipient is not on the exact allowlist",
   human_approval: "Human approval required before sending",
-  task_scope: "Selected task mode prohibits this action",
-  reference_pending: "Required reference must be read and screened first",
+  task_scope: "The task did not authorize this action",
+  reference_pending: "Required reference must be read and screened before editing or email actions",
   tool_result_dlp: "Sensitive content withheld from a tool result",
   tool_budget: "Tool attempt limit reached",
   policy_pass: "Tool, scope, permissions, and data checks passed",
@@ -159,20 +172,7 @@ function quarantineDescription(run) {
   return sources.map((source) => {
     const labels = [...new Set((source.findings || []).map((finding) => FINDING_GUIDANCE[finding.category]?.label || "Suspicious instruction"))];
     return `${source.source_id}: ${labels.join(", ") || "Review unavailable or invalid"}.`;
-  }).join(" ") + " Drafting and sending are disabled for the run.";
-}
-
-function taskModeHelp() {
-  const mode = $("task-mode").value;
-  $("allow-draft").disabled = mode === "summarize";
-  $("allow-send").disabled = mode !== "send";
-  if (mode === "summarize") $("allow-draft").checked = false;
-  if (mode !== "send") $("allow-send").checked = false;
-  $("task-mode-help").textContent = {
-    summarize: "The supplied document must be read through a tool. Only document reads and summaries are permitted.",
-    draft: "Drafts require the permission below. Sending is prohibited for this task.",
-    send: "Email actions require the permissions below. Every send still needs approval of the exact payload.",
-  }[mode];
+  }).join(" ") + " Editing, drafting and sending are disabled for the run.";
 }
 
 function error(message) {
@@ -190,8 +190,8 @@ async function request(path, body) {
 
 function modeHelp() {
   $("mode-help").textContent = $("mode").value === "replay"
-    ? "Offline replay: required document read, scripted tool proposals and heuristic screening. No LLM is called."
-    : `Live mode: ${config.agent_model} must call read_document before answering; ${config.reviewer_model} reviews the document. Additional tool choices may vary.`;
+    ? "Scripted tool calls · no API calls."
+    : "Live agent + AI review · tool choices may vary.";
 }
 
 function selectScenario() {
@@ -199,12 +199,8 @@ function selectScenario() {
   if (!scenario) return;
   $("document").value = scenario.document;
   $("task").value = scenario.task;
-  $("allow-draft").checked = scenario.allow_draft;
-  $("allow-send").checked = scenario.allow_send;
-  $("task-mode").value = scenario.task_mode || "summarize";
-  $("required-document").value = scenario.required_document || "";
-  taskModeHelp();
-  $("scenario-description").textContent = scenario.description;
+  $("scenario-description").textContent = SCENARIO_SUMMARIES[scenario.id] || scenario.description;
+  $("scenario-description").title = scenario.description;
   updateCount();
 }
 
@@ -214,7 +210,8 @@ function updateCount() {
 
 function markCustom() {
   $("scenario").value = "custom";
-  $("scenario-description").textContent = "Your own text. Offline mode previews the text and replays a public read; use live mode for actual AI screening and tool decisions.";
+  $("scenario-description").textContent = "Your text. Use live mode for AI decisions.";
+  $("scenario-description").removeAttribute("title");
   updateCount();
 }
 
@@ -234,7 +231,7 @@ function resetResults() {
   $("verdict").className = "";
   $("task-verdict").textContent = "—";
   $("task-verdict").className = "";
-  $("task-review-note").textContent = "Checking the user task against the selected permissions…";
+  $("task-review-note").textContent = "Checking requested tools and sensitive data…";
   $("blocked-count").textContent = "0 / 0";
   $("blocked-count").setAttribute("aria-label", "0 tool calls, 0 blocked");
   $("request-count").textContent = "0";
@@ -268,8 +265,8 @@ function updateTabs() {
   $("result-content").setAttribute("aria-labelledby", resultView === "off" ? "unprotected-tab" : "protected-tab");
   $("comparison-notice").hidden = resultView !== "off";
   $("comparison-notice").textContent = protectedRun?.mode === "live"
-    ? "Firewall off · Separate live run of the same model and inputs. Screening, tool permissions, outbound policy and send approval are disabled. The model may still refuse. Extra API calls apply. All secrets, sends, deletions and commands are synthetic mock effects."
-    : "Firewall off · Scripted vulnerable-agent replay using the same inputs, with screening, tool permissions, outbound policy and send approval disabled. This illustrates possible consequences; it does not predict what an LLM would do. All secrets, sends, deletions and commands are synthetic mock effects.";
+    ? "Firewall off · Separate live run of the same model and inputs. Screening, tool permissions, outbound policy and send approval are disabled. The model may still refuse. Extra API calls apply. All secrets, edits, sends, deletions and commands are synthetic mock effects."
+    : "Firewall off · Scripted vulnerable-agent replay using the same inputs, with screening, tool permissions, outbound policy and send approval disabled. This illustrates possible consequences; it does not predict what an LLM would do. All secrets, edits, sends, deletions and commands are synthetic mock effects.";
 }
 
 function showSelectedResult() {
@@ -372,7 +369,7 @@ function render(run) {
     $("verdict").textContent = run.review.risk[0].toUpperCase() + run.review.risk.slice(1);
     $("verdict").className = run.review.quarantine ? "risk-warning" : "risk-benign";
     const count = (number, label) => `${number} ${label}${number === 1 ? "" : "s"}`;
-    $("review-note").textContent = `${metrics.quarantined_sources ? "Quarantine disables drafting and sending for the whole run. " : ""}${count(metrics.unsafe_requests_detected, "inferred unsafe request")} · ${count(metrics.blocked_tool_calls, "blocked tool call")} · ${count(metrics.actions_executed, "executed action")}.`;
+    $("review-note").textContent = `${metrics.quarantined_sources ? "Quarantine disables editing, drafting and sending for the whole run. " : ""}${count(metrics.unsafe_requests_detected, "inferred unsafe request")} · ${count(metrics.blocked_tool_calls, "blocked tool call")} · ${count(metrics.actions_executed, "executed action")}.`;
   } else {
     $("verdict").textContent = "Not screened";
     $("verdict").className = "";
@@ -464,10 +461,35 @@ function renderApprovals(run) {
 
 function renderArtifacts(run) {
   const artifacts = [...run.drafts.map((item) => ({...item, kind: "Draft"})), ...run.outbox.map((item) => ({...item, kind: "Mock outbox"}))];
-  $("artifacts-panel").hidden = !artifacts.length;
+  const edits = run.edits || [];
+  $("artifacts-panel").hidden = !artifacts.length && !edits.length;
   $("artifacts").replaceChildren(...artifacts.map((item) => {
     const card = element("div", "artifact");
     card.append(element("strong", "", `${item.kind} · ${item.to}`), element("pre", "", `Subject: ${item.subject}\n\n${item.body}`));
+    return card;
+  }), ...edits.map((edit) => {
+    const card = element("div", "artifact edit-artifact");
+    card.append(element("strong", "", `Mock file edited · ${edit.document_id}`));
+    const diff = element("div", "edit-diff");
+    for (const [label, text] of [["Removed", edit.old_text], ["Added", edit.new_text]]) {
+      const part = element("div", label === "Removed" ? "edit-removed" : "edit-added");
+      part.append(element("span", "tiny-label", label), element("pre", "", text || "(empty)"));
+      diff.append(part);
+    }
+    const details = element("details", "edit-contents");
+    details.append(element("summary", "", "Full before / after document"));
+    for (const [label, text] of [["Before", edit.before], ["After", edit.after]]) details.append(element("h4", "", label), element("pre", "", text));
+    const download = element("button", "text-button", "Download edited text ↗");
+    download.type = "button";
+    download.addEventListener("click", () => {
+      const url = URL.createObjectURL(new Blob([edit.after], {type: "text/plain;charset=utf-8"}));
+      const link = element("a");
+      link.href = url;
+      link.download = `${edit.document_id.replace(/[^a-z0-9_-]/gi, "_")}-edited.txt`;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    });
+    card.append(diff, details, download);
     return card;
   }));
 }
@@ -482,14 +504,14 @@ async function poll(runId) {
     if (terminalStatuses.includes(run.status)) {
       running = false;
       $("run").disabled = false;
-      $("run").replaceChildren(document.createTextNode("Run defense demo "), element("span", "", "→"));
+      $("run").replaceChildren(document.createTextNode("Run demo "), element("span", "", "→"));
     }
     if (!["completed", "failed"].includes(run.status)) timer = setTimeout(() => poll(runId), 900);
   } catch (problem) {
     running = false;
     error(problem.message);
     $("run").disabled = false;
-    $("run").textContent = "Run defense demo →";
+    $("run").textContent = "Run demo →";
   }
 }
 
@@ -503,7 +525,7 @@ $("run").addEventListener("click", async () => {
   $("run").disabled = true;
   $("run").textContent = "Running checks…";
   try {
-    const run = await request("/api/runs", {mode: $("mode").value, scenario_id: $("scenario").value, task_mode: $("task-mode").value, required_document: $("required-document").value, task: $("task").value, document: $("document").value, allow_draft: $("allow-draft").checked, allow_send: $("allow-send").checked});
+    const run = await request("/api/runs", {mode: $("mode").value, scenario_id: $("scenario").value, task: $("task").value, document: $("document").value});
     protectedRun = run;
     showSelectedResult();
     await poll(run.id);
@@ -511,7 +533,7 @@ $("run").addEventListener("click", async () => {
     running = false;
     error(problem.message);
     $("run").disabled = false;
-    $("run").textContent = "Run defense demo →";
+    $("run").textContent = "Run demo →";
     setBadge($("run-status"), "failed", "failed");
   }
 });
@@ -545,35 +567,10 @@ $("document").addEventListener("input", markCustom);
 $("task").addEventListener("input", markCustom);
 $("scenario").addEventListener("change", selectScenario);
 $("mode").addEventListener("change", modeHelp);
-$("task-mode").addEventListener("change", taskModeHelp);
-
-$("evaluate").addEventListener("click", async () => {
-  $("evaluate").disabled = true;
-  $("evaluate").textContent = "Checking scenarios…";
-  error("");
-  try {
-    const report = await request("/api/evaluations", {});
-    $("evaluation-panel").hidden = false;
-    setBadge($("evaluation-status"), `${report.passed}/${report.total} passed`, report.passed === report.total ? "allowed" : "blocked");
-    $("evaluation-summary").textContent = `${report.unauthorized_executions} unauthorized actions executed · ${report.task_checks_passed}/${report.total} replay task checks passed · ${report.false_positives}/${report.benign_controls} benign controls quarantined.`;
-    $("evaluation-cases").replaceChildren(...report.cases.map((item) => {
-      const row = element("tr");
-      row.append(element("td", "", item.name.replace(/^\d+\s*\/\s*/, "")), element("td", item.passed ? "risk-benign" : "risk-warning", item.passed ? "PASS" : "FAIL"), element("td", "", String(item.blocked_calls)), element("td", "", item.protections.map((rule) => RULE_LABELS[rule] || rule.replaceAll("_", " ")).join("; ") || "No intervention needed"));
-      return row;
-    }));
-    $("evaluation-panel").scrollIntoView({behavior: "smooth", block: "start"});
-  } catch (problem) { error(problem.message); }
-  finally { $("evaluate").disabled = false; $("evaluate").textContent = "Run regression report →"; }
-});
 
 async function init() {
   try {
     config = await request("/api/config");
-    for (const id of config.public_document_ids || []) {
-      const option = element("option", "", id);
-      option.value = id;
-      $("required-document").append(option);
-    }
     $("scenario").replaceChildren(...config.scenarios.map((scenario) => {
       const option = element("option", "", scenario.name);
       option.value = scenario.id;
@@ -584,7 +581,6 @@ async function init() {
     $("scenario").append(custom);
     $("mode").querySelector('[value="live"]').disabled = !config.live_available;
     $("mode").value = config.live_available ? "live" : "replay";
-    $("recipients").textContent = config.allowed_recipients.join(", ") || "None";
     $("model-info").textContent = `AGENT ${config.agent_model} / REVIEWER ${config.reviewer_model} / API ${config.live_available ? "CONFIGURED" : "NOT CONFIGURED"}`;
     selectScenario();
     modeHelp();
