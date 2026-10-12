@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="theme-color" content="#f5f7fb">
+  <meta name="description" content="Agent Sentinel sandbox demo: watch safe agent reads and policy-blocked malicious actions.">
+  <title>Agent Sentinel — Sandbox demo</title><link rel="stylesheet" href="./styles.css?v=4"><script src="./app.js?v=4" defer></script>
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <a class="brand" href="#top"><span class="brand-mark"><svg viewBox="0 0 32 32"><path d="M16 3.5 27 8v7.3c0 7-4.7 11.5-11 13.2C9.7 26.8 5 22.3 5 15.3V8l11-4.5Z"/><path d="m11.5 16 3 3 6.5-7"/></svg></span><span><b>AGENT SENTINEL</b><small>SECURITY CONSOLE</small></span></a>
+    <div class="workspace-label">WORKSPACE</div><div class="workspace"><span class="workspace-icon">N</span><span><b>Northstar Labs</b><small>Sandbox demo</small></span><span class="chevron">⌄</span></div>
+    <div class="nav-label">SIMULATION</div><a class="nav-link active" href="#overview"><span>◫</span>Run overview</a><a class="nav-link" href="#agents"><span>◎</span>Agent roster <i>4</i></a><a class="nav-link" href="#files"><span>▤</span>File workspace <i>4</i></a><a class="nav-link" href="#activity"><span>◷</span>Decision log</a>
+    <div class="side-note"><span class="lock-icon">⌑</span><b>Sandboxed by design</b><p>No connected agents, external tools, or real customer data. All activity below is simulated locally.</p></div>
+    <div class="side-user"><span class="user-avatar">JD</span><span><b>Jordan Davis</b><small>Security admin</small></span><span class="more">···</span></div>
+  </aside>
+  <main class="main" id="top">
+    <header class="topbar"><div class="crumb"><span>Sandbox</span><i>/</i><b>Agent behavior lab</b></div><div class="top-right"><span class="mode"><i></i>DEMO MODE</span><span class="admin-avatar">JD</span></div></header>
+    <div class="content">
+      <section class="heading"><div><div class="eyebrow"><span></span>SECURITY WORKSPACE <b>·</b> INTERACTIVE DEMO</div><h1>Agent behavior lab</h1><p>Watch approved agents work and see policy stop unsafe actions before any tool can run.</p></div><div class="heading-actions"><button class="btn-secondary" id="resetBtn" disabled>↺ <span>Reset</span></button><button class="btn-primary" id="runBtn"><span class="play">▶</span><span>Run demo</span></button></div></section>
+      <div class="demo-banner"><span class="shield-small">✓</span><span><b>Isolated demo environment</b><span>Agents read the sample files below. Risky tool calls are intercepted locally and never executed.</span></span><span class="banner-tag">NO EXTERNAL ACTIONS</span></div>
+      <section class="stats" aria-label="Demo statistics"><article class="stat"><div><span>Agents in run</span><i class="stat-glyph blue">◎</i></div><b id="statAgents">4</b><small>2 approved · 2 untrusted tests</small></article><article class="stat"><div><span>Safe file reads</span><i class="stat-glyph green">✓</i></div><b id="statReads">0</b><small>Allowed by workspace scope</small></article><article class="stat"><div><span>Unsafe actions stopped</span><i class="stat-glyph red">⛨</i></div><b id="statBlocked">0</b><small>Denied before tool execution</small></article><article class="stat"><div><span>Tool calls executed</span><i class="stat-glyph slate">↗</i></div><b id="statTools">0</b><small>External or privileged actions</small></article></section>
+      <section class="layout-grid">
+        <article class="card agent-card" id="agents"><div class="card-heading"><div><div class="section-title"><span class="title-icon">◎</span><div><h2>Agent roster</h2><p>Four isolated demo agents, one shared policy gate</p></div></div></div><span class="roster-count">4 READY</span></div><div id="agentRoster" class="roster"></div><div class="roster-foot"><span class="tiny-check">✓</span> Every proposed tool action is checked before execution.</div></article>
+        <article class="card workspace-card" id="files"><div class="card-heading"><div class="section-title"><span class="title-icon folder-icon">▰</span><div><h2>File workspace</h2><p>Files available to the demo agents</p></div></div><span class="count-pill">4 FILES</span></div><div class="file-list" id="fileList"></div><div class="workspace-foot"><span class="folder-path">▰ &nbsp; /sandbox</span><span>Read only</span></div></article>
+      </section>
+      <section class="card flow-card"><div class="card-heading"><div class="section-title"><span class="title-icon gate-icon">⛨</span><div><h2>Policy gate</h2><p>Decision path between agent intent and tool execution</p></div></div><span class="policy-version">POLICY V3.0</span></div><div class="gate-flow"><div class="gate-step"><span class="step-number">01</span><span class="step-icon agent-step">◎</span><span><b>Agent request</b><small>Read a file or propose an action</small></span></div><span class="flow-arrow">→</span><div class="gate-step"><span class="step-number">02</span><span class="step-icon scan-step">⌕</span><span><b>Inspect intent</b><small>Match scope, policy, and keywords</small></span></div><span class="flow-arrow">→</span><div class="gate-step gate-decision"><span class="step-number">03</span><span class="step-icon decision-step">⛨</span><span><b>Allow or block</b><small>Block first · execute only if allowed</small></span></div></div></section>
+      <section class="card activity-card" id="activity"><div class="card-heading activity-heading"><div class="section-title"><span class="title-icon activity-icon">◷</span><div><h2>Decision log</h2><p id="logSubtitle">Run the demo to watch each file read and policy decision.</p></div></div><span class="live-chip"><i></i><span id="runState">WAITING</span></span></div><div class="log-wrap"><div id="logEmpty" class="empty-log"><span class="empty-icon">⌁</span><b>Ready when you are</b><span>Safe requests will be allowed. Malicious instructions will be detected and stopped before any tool runs.</span></div><ol id="logList" class="log-list"></ol></div><div class="activity-footer"><span><i class="footer-dot"></i>Policy enforcement point <b>·</b> before tool execution</span><button id="clearLog" disabled>Clear run</button></div></section>
+      <footer><span>Agent Sentinel <b>·</b> Sandbox demo</span><span><i></i> Local simulation only</span></footer>
+    </div>
+  </main>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+</body></html>

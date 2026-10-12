@@ -1,0 +1,9 @@
+{
+  "policyVersion": "3.0-demo",
+  "defaultAction": "deny",
+  "rules": [
+    {"id":"POL-01","name":"Prompt injection / approval bypass","keywords":["ignore approval","disable safeguards","override policy"],"action":"quarantine"},
+    {"id":"POL-02","name":"Sensitive data movement","keywords":["export customer records","external endpoint","send the workspace data outside"],"action":"deny before tool execution"},
+    {"id":"POL-03","name":"Secret access","keywords":["reveal secrets","api key","password"],"action":"deny before tool execution"}
+  ]
+}
