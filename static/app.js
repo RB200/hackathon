@@ -642,7 +642,7 @@ $("export").addEventListener("click", () => {
   const url = URL.createObjectURL(new Blob([JSON.stringify(currentRun, null, 2)], {type: "application/json"}));
   const link = element("a");
   link.href = url;
-  link.download = `agent-gate-${currentRun.id}.json`;
+  link.download = `prompt-guardian-${currentRun.id}.json`;
   link.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
