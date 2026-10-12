@@ -2,6 +2,8 @@
 
 A local demo of defenses for a document-reading AI agent: document screening, server-enforced tool permissions, secret checks, human approval, and an isolated firewall-off comparison. Tools use mock data; no real files are edited and no mail is sent.
 
+[Watch the demo](https://www.youtube.com/watch?v=FNZFqLeXGL4)
+
 ## Run
 
 Requires Python 3.10+; no packages to install.
