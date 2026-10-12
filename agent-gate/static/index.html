@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Agent Gate — Defense Lab</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/metrics.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Agent Gate home"><span class="brand-icon">AG</span> AGENT GATE <span class="brand-divider">/</span> <span class="muted">DEFENSE LAB</span></a>
+    <span class="environment"><span class="dot"></span> LOCAL SANDBOX</span>
+  </header>
+  <main>
+    <section class="intro">
+      <div><p class="eyebrow">AI SECURITY / LIVE DEMONSTRATION</p><h1>Give agents tools.<br><span>Keep control.</span></h1><p class="lede">Inspect untrusted documents, enforce permissions, and trace every decision.</p></div>
+      <div class="intro-note"><span class="note-icon">⌁</span><p>Detection is a signal.<br><strong>Permissions enforce the boundary.</strong></p></div>
+    </section>
+    <section class="pipeline" aria-label="Defense layers">
+      <div><span class="step-number">01</span><span>Untrusted source<small>Separate facts from instructions</small></span></div>
+      <span class="arrow">→</span><div><span class="step-number">02</span><span>Document screening<small>LLM review + heuristics</small></span></div>
+      <span class="arrow">→</span><div><span class="step-number">03</span><span>Tool gate<small>Scope · schema · permissions</small></span></div>
+      <span class="arrow">→</span><div><span class="step-number">04</span><span>Outbound checks<small>Secrets · approval · audit</small></span></div>
+    </section>
+    <div id="global-error" class="error-box" role="alert" hidden></div>
+    <div class="workspace">
+      <section class="panel inputs">
+        <div class="panel-heading"><h2>Set up a run</h2><span class="tiny-label">INPUT</span></div>
+        <label for="scenario">Demo scenario</label><select id="scenario"></select><p id="scenario-description" class="help"></p>
+        <div class="mode-row"><label for="mode">Execution</label><select id="mode"><option value="replay">Offline replay</option><option value="live">Live OpenAI agent</option></select></div>
+        <p id="mode-help" class="mode-help"></p>
+        <div class="field-header"><label for="document">Untrusted document</label><label class="upload-button" for="file">Upload text ↗</label><input id="file" type="file" accept=".txt,.md,.csv,.json,.log,text/plain,text/markdown" hidden></div>
+        <textarea id="document" rows="9" maxlength="20000" spellcheck="false"></textarea><p class="help"><span id="document-count">0</span> / 20,000 characters · plain text only</p>
+        <label for="task">User task</label><textarea id="task" rows="3" maxlength="2000"></textarea>
+        <fieldset><legend>Permissions for this run</legend><label class="checkbox"><input type="checkbox" id="allow-draft"><span>Allow email drafts</span></label><label class="checkbox"><input type="checkbox" id="allow-send"><span>Allow send requests <small>Always requires approval</small></span></label><p class="help">Allowed recipient: <span id="recipients"></span><br>Public documents only · 8 tool attempts per run</p></fieldset>
+        <button id="run" class="primary" type="button">Run defense demo <span>→</span></button>
+        <p class="footnote">Emails stay in a mock outbox. No real mail is sent.</p>
+      </section>
+      <div class="results-column">
+        <section class="panel result-panel">
+          <div class="panel-heading"><h2>Defense result</h2><span id="run-status" class="badge neutral">READY</span></div>
+          <div class="metrics"><div><span>Document verdict</span><strong id="verdict">—</strong></div><div><span>Review findings</span><strong id="finding-count">0</strong></div><div><span>Quarantined</span><span class="metric-quarantine"><button id="quarantine-count" class="metric-value-help" type="button" aria-describedby="quarantine-tooltip" aria-label="Quarantined sources: 0">0</button><span id="quarantine-tooltip" class="metric-tooltip" role="tooltip">No source has been quarantined in this run.</span></span></div><div title="Includes unsafe tool actions identified during screening and tool calls rejected by the gate."><span>Tool actions stopped</span><strong id="blocked-count">0</strong></div><div><span>Mock sends</span><strong id="sent-count">0</strong></div></div>
+          <div id="review-note" class="review-note">Choose a scenario to inspect what the agent can do and where the defense intervenes.</div>
+          <div class="decision-log">
+            <div class="panel-heading"><h2>Decision log</h2><div class="log-controls"><span id="event-count" class="tiny-label">0 EVENTS</span><button id="export" class="text-button" disabled>Export JSON ↗</button></div></div>
+            <p class="log-hint">Click any entry to inspect its recorded evidence, inputs and policy checks.</p>
+            <div id="events" class="events" aria-live="polite"><div class="empty-log"><span>◎</span><p>Every check leaves a trace.</p><small>Screening evidence, tool arguments and policy decisions appear here.<br>Sensitive values are redacted.</small></div></div>
+          </div>
+          <div class="answer-heading"><h3>Agent answer</h3><span id="execution-label" class="tiny-label">NOT STARTED</span></div>
+          <p id="summary" class="summary empty">The summary and tool outcomes will appear here.</p>
+          <div id="run-error" class="error-box" role="alert" hidden></div>
+        </section>
+        <section id="approval-panel" class="panel approval-panel" hidden><div class="panel-heading"><h2>Review before sending</h2><span class="badge warning">HUMAN APPROVAL</span></div><p class="help">Approval applies to the exact payload below. It cannot override a policy block. Requests expire after five minutes.</p><div id="approvals"></div></section>
+        <section id="artifacts-panel" class="panel" hidden><div class="panel-heading"><h2>Local artifacts</h2><span class="tiny-label">MOCK TOOLS</span></div><div id="artifacts"></div></section>
+      </div>
+    </div>
+    <footer><span>AGENT GATE / HACKATHON DEMO</span><span id="model-info">Loading configuration…</span></footer>
+  </main>
+</body>
+</html>
