@@ -225,6 +225,9 @@ function resetResults() {
   $("result-content").hidden = false;
   $("comparison-loading").hidden = true;
   $("result-heading").textContent = "Defense result";
+  $("outcome-banner").hidden = true;
+  $("effect-comparison").hidden = true;
+  $("intervention-summary").hidden = true;
   currentRun = null;
   renderSignature = "";
   $("verdict").textContent = "—";
@@ -271,6 +274,7 @@ function updateTabs() {
 
 function showSelectedResult() {
   updateTabs();
+  renderEffectComparison();
   const selected = resultView === "off" ? comparisonRun : protectedRun;
   $("result-content").hidden = !selected;
   $("comparison-loading").hidden = resultView !== "off" || !!selected;
@@ -294,6 +298,7 @@ async function setResultView(view) {
     const run = await request(`/api/runs/${parentId}/comparison`, {});
     if (epoch !== resultEpoch) return;
     comparisonRun = run;
+    renderEffectComparison();
     if (resultView === "off") showSelectedResult();
     await pollComparison(run.id, epoch);
   } catch (problem) {
@@ -310,6 +315,7 @@ async function pollComparison(runId, epoch) {
     const run = await request(`/api/runs/${runId}`);
     if (epoch !== resultEpoch || comparisonRun?.id !== runId) return;
     comparisonRun = run;
+    renderEffectComparison();
     if (resultView === "off") showSelectedResult();
     if (!["completed", "failed"].includes(run.status)) comparisonTimer = setTimeout(() => pollComparison(runId, epoch), 900);
   } catch (problem) {
@@ -329,6 +335,94 @@ for (const [view, id] of [["protected", "protected-tab"], ["off", "unprotected-t
   });
 }
 
+$("compare-effects").addEventListener("click", () => setResultView("off"));
+
+function shortText(text) {
+  const value = String(text ?? "").replace(/\s+/g, " ").trim();
+  return value.length > 130 ? value.slice(0, 127) + "…" : value || "(empty)";
+}
+
+function effectFacts(run, other) {
+  if (!run) return ["Not run yet", "Not run yet", "Not run yet", "Not run yet", "Not run yet"];
+  if (!terminalStatuses.includes(run.status)) return Array(5).fill("Running…");
+  const edits = run.edits || [], effects = run.comparison_effects || {};
+  const seenDocuments = new Set();
+  const originalEdits = (other?.edits || []).filter((edit) => {
+    if (seenDocuments.has(edit.document_id) || effects.deleted_documents?.includes(edit.document_id)) return false;
+    seenDocuments.add(edit.document_id);
+    return true;
+  });
+  const files = edits.length
+    ? edits.map((edit) => `${edit.document_id}: ${shortText(edit.old_text)} → ${shortText(edit.new_text)}`).join("\n")
+    : originalEdits.length
+      ? "No edits; kept original text:\n" + originalEdits.map((edit) => `${edit.document_id}: ${shortText(edit.old_text)}`).join("\n")
+      : "No files edited";
+  const sends = (run.outbox || []).length
+    ? run.outbox.map((item) => `Mock email sent to ${item.to}`).join("\n")
+    : (run.pending || []).length ? "Waiting for approval; pending email not sent" : "No mock email sent";
+  const failed = run.status === "failed" ? " (run failed; effects recorded so far)" : "";
+  return [files, sends, effects.secret_reads ? `${effects.secret_reads} synthetic secret read(s)` : "No protected secret retrieved",
+    effects.deleted_documents?.length ? effects.deleted_documents.join(", ") + " deleted (mock)" : "No documents deleted",
+    effects.simulated_commands?.length ? `${effects.simulated_commands.length} command(s) simulated` : "No commands simulated"].map((value) => value + failed);
+}
+
+function renderEffectComparison() {
+  $("effect-comparison").hidden = !protectedRun;
+  if (!protectedRun) return;
+  const ready = terminalStatuses.includes(protectedRun.status);
+  $("compare-effects").hidden = !!comparisonRun;
+  $("compare-effects").disabled = !ready || comparisonStarting;
+  $("compare-effects").textContent = comparisonStarting ? "Starting comparison…" : "Compare with firewall off →";
+  $("effect-comparison-note").textContent = protectedRun.mode === "replay"
+    ? "Recorded mock effects. Firewall off uses a scripted vulnerable agent, not a prediction of live AI behavior."
+    : "Recorded mock effects from separate live runs. The model may refuse even with the firewall off.";
+  const protectedFacts = effectFacts(protectedRun, comparisonRun), offFacts = effectFacts(comparisonRun, protectedRun);
+  const labels = ["File edits", "Email", "Protected data", "Deletion", "Commands"];
+  // Keep the first two rows visible; add other effects when a request or execution is recorded.
+  const events = [...(protectedRun.events || []), ...(comparisonRun?.events || [])];
+  const tools = events.map((event) => event.details?.tool);
+  const visible = new Set([0, 1]);
+  if (comparisonRun?.comparison_effects?.secret_reads || events.some((event) => event.details?.arguments?.document_id === "secrets.env")) visible.add(2);
+  if (tools.includes("delete_document")) visible.add(3);
+  if (tools.includes("execute_shell")) visible.add(4);
+  $("effect-rows").replaceChildren(...labels.flatMap((label, index) => {
+    if (!visible.has(index)) return [];
+    const row = element("tr");
+    const heading = element("th", "", label);
+    heading.scope = "row";
+    row.append(heading, element("td", "", protectedFacts[index]), element("td", "", offFacts[index]));
+    return [row];
+  }));
+}
+
+function renderOutcome(run) {
+  const outcome = run.outcome;
+  $("outcome-banner").hidden = !outcome;
+  if (!outcome) return;
+  $("outcome-banner").className = `outcome-banner outcome-${outcome.state}`;
+  $("outcome-title").textContent = outcome.title;
+  $("outcome-message").textContent = outcome.message;
+  $("intervention-summary").hidden = run.firewall_enabled === false || !terminalStatuses.includes(run.status);
+  const interventions = outcome.interventions || [];
+  $("interventions").replaceChildren(...interventions.map((item) => {
+    const row = element("div", "intervention-row");
+    const button = element("button", "text-button", `${item.layer} · view check ${String(item.sequence).padStart(2, "0")} ↗`);
+    button.type = "button";
+    button.addEventListener("click", () => {
+      const disclosure = [...$("events").querySelectorAll(".event-disclosure")].find((node) => node.dataset.sequence === String(item.sequence));
+      if (!disclosure) return;
+      disclosure.open = true;
+      disclosure.scrollIntoView({behavior: "smooth", block: "center"});
+      disclosure.querySelector("summary").focus({preventScroll: true});
+    });
+    row.append(button, element("p", "", item.explanation));
+    return row;
+  }));
+  if (!interventions.length) $("interventions").append(element("p", "help", run.metrics?.unsafe_requests_detected
+    ? "No firewall block was recorded. The agent did not submit a blocked call; a refusal or omission is model behavior."
+    : "No intervention was needed in the recorded checks. Every submitted tool call still went through the gate."));
+}
+
 function render(run) {
   const previousId = currentRun?.id;
   currentRun = run;
@@ -339,6 +433,7 @@ function render(run) {
   const signature = JSON.stringify([run.id, run.status, events.length, pending.map((item) => item.id), run.error, run.task_review]);
   if (signature === renderSignature) return;
   renderSignature = signature;
+  renderOutcome(run);
   $("result-heading").textContent = firewallOff ? "Firewall-off result" : "Defense result";
   $("execution-label").textContent = `${run.mode === "replay" ? "SCRIPTED REPLAY" : "LIVE OPENAI"}${firewallOff ? " · FIREWALL OFF" : ""}`;
   setBadge($("run-status"), run.status, run.status);
@@ -535,6 +630,10 @@ $("run").addEventListener("click", async () => {
     $("run").disabled = false;
     $("run").textContent = "Run demo →";
     setBadge($("run-status"), "failed", "failed");
+    $("outcome-banner").hidden = false;
+    $("outcome-banner").className = "outcome-banner outcome-failed";
+    $("outcome-title").textContent = "Run could not start";
+    $("outcome-message").textContent = problem.message;
   }
 });
 

@@ -64,6 +64,16 @@ Internal offline checks are available through `/api/evaluations`; the demo UI ha
 
 **Export JSON** downloads the redacted run snapshot, including initial and retrieved source reviews, policy, decisions, drafts, approvals, and mock outbox.
 
+### Read the outcome
+
+The **Agent answer** sits in a prominent card immediately below the outcome banner, before the comparison, metrics and decision log. Its **Recorded action status** stays inside the same card so model claims can be compared with actual server-recorded effects.
+
+The **Recorded outcome** banner is derived from server state and audit events, independently of the agent's answer. It distinguishes a completed run, firewall intervention, an inferred unsafe request with no actual block, incomplete actions, pending approval and failures. A completed run describes recorded checks; it does not independently verify answer quality or every part of the task. **Where the defense intervened** identifies screening, the tool gate, data checks or human approval. Click a layer to open its exact decision-log entry. A model refusal or omission gets no firewall-block credit.
+
+**What changed?** compares recorded mock edits and email recipients, plus secret retrieval, deletion or simulated commands when relevant. The firewall-off column says **Not run yet** until you explicitly start the comparison; it never invents an unprotected outcome. It shows the actual replacement text, such as the budget staying at $5,000 versus changing to $50,000. Both columns persist when switching tabs and reset for a new run. Partial effects from failed runs are labeled.
+
+For a short demo: run **01** to show normal reads, **05** to show screening and blocked editing, then click **Compare with firewall off** to show the changed mock budget. Finish with **03** to demonstrate an independent tool-allowlist block against a clean document. Offline mode is repeatable; live tool choices can differ.
+
 ### Edit mock files
 
 Ask for the desired change in the user task, for example: `Edit supplied-document: replace Friday with Monday.` The server grants the registered edit tool when its local task-intent check recognizes the request. In live mode the agent reads the target then proposes `edit_document({document_id, old_text, new_text})`; offline scenario 04 scripts the same edit. Custom offline mode remains a document preview and does not interpret arbitrary editing instructions.
@@ -77,6 +87,8 @@ After a protected run finishes, select **Firewall off** at the top of its result
 The comparison disables source review, quarantine, tool permissions, recipient restrictions, outbound policy checks and human approval **inside an isolated mock tool environment**. It can read a synthetic `secrets.env`, send directly to its own mock outbox, edit or delete copies of mock documents, or record simulated commands. It cannot access real files, execute a shell or deliver email. Transport redaction of configured credentials and audit redaction remain in place. Disabled detector counters show **Off**, rather than suggesting the input was safe.
 
 Offline mode uses a labeled vulnerable-agent script to illustrate possible consequences. It is not a prediction or evidence that an LLM was compromised. Live mode makes additional agent API calls with screening and application policy removed, and exposes the mock destructive tools; the model can still refuse. The two live runs can differ because the prompts, available tools and model choices differ. Compare recorded calls and mock effects, not just the wording of the answer.
+
+In a live firewall-off comparison, a destructive action explicitly requested by the user task is forced through its mock tool before the agent answers. An “all documents” request constrains the mock deletion target to `*`. The answer must report the tool's actual result; only documents listed in the comparison's isolated mock store are affected. This makes the deletion demo reproducible while preserving the distinction between claimed and recorded effects.
 
 ## Defense layers
 
