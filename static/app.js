@@ -276,7 +276,9 @@ function showSelectedResult() {
   updateTabs();
   renderEffectComparison();
   const selected = resultView === "off" ? comparisonRun : protectedRun;
-  $("result-content").hidden = !selected;
+  // Keep the protected empty state visible before the first run. The firewall-off
+  // tab is disabled until a completed protected run exists.
+  $("result-content").hidden = resultView === "off" && !selected;
   $("comparison-loading").hidden = resultView !== "off" || !!selected;
   if (selected) render(selected);
   else {
